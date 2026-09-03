@@ -1,0 +1,21 @@
+{% load i18n %}
+
+<span class="flex min-w-0 items-center gap-3">
+    {% if site_logo.light and site_logo.dark %}
+        <img src="{{ site_logo.dark }}" alt="{{ site_header }}" class="hidden h-10 w-10 rounded-lg object-cover dark:block">
+        <img src="{{ site_logo.light }}" alt="{{ site_header }}" class="block h-10 w-10 rounded-lg object-cover dark:hidden">
+    {% else %}
+        <img src="{{ site_logo }}" alt="{{ site_header }}" class="h-10 w-10 rounded-lg object-cover">
+    {% endif %}
+
+    <span class="min-w-0 leading-tight">
+        <span class="block truncate font-semibold text-font-important-light dark:text-font-important-dark">
+            {{ site_header }}
+        </span>
+        {% if site_subheader %}
+            <span class="block truncate text-xs font-normal text-font-subtle-light dark:text-font-subtle-dark">
+                {{ site_subheader }}
+            </span>
+        {% endif %}
+    </span>
+</span>

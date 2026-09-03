@@ -1,0 +1,12 @@
+.category-drag-handle {
+    color: var(--color-base-500);
+    cursor: grab;
+    font-size: 1.35rem;
+    line-height: 1;
+    user-select: none;
+}
+
+.category-drag-handle:active { cursor: grabbing; }
+.category-sort-dragging { opacity: .45; }
+.category-sort-saving { cursor: progress; }
+.category-sort-disabled { cursor: not-allowed; opacity: .4; }

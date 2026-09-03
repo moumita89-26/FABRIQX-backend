@@ -1,0 +1,21 @@
+{% extends "admin/login.html" %}
+
+{% load i18n static %}
+
+{% block title %}{% translate "Logged out" %} | {{ site_title }}{% endblock %}
+
+{% block base %}
+    <main class="fabriqx-login-shell">
+        <section class="fabriqx-login-card" aria-labelledby="logout-title">
+            <img class="fabriqx-login-logo" src="{% static 'branding/fabriqx-logo.jpeg' %}" alt="FABRIQX logo">
+            <h1 id="logout-title">Successfully logged out</h1>
+            <p class="fabriqx-login-subtitle">You have securely signed out of FABRIQX Administration.</p>
+
+            <a class="fabriqx-login-submit inline-flex items-center justify-center no-underline" href="{% url 'admin:login' %}">
+                Log in again
+            </a>
+
+            <p class="fabriqx-login-footer">&copy; {% now "Y" %} FABRIQX. Crafted for every celebration.</p>
+        </section>
+    </main>
+{% endblock %}

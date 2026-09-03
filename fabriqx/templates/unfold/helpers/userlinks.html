@@ -1,0 +1,43 @@
+{% load i18n admin_urls unfold %}
+<div class="flex flex-row gap-3 items-center ml-auto">
+{% action_list %}
+{% if cl and has_add_permission %}
+    {% url cl.opts|admin_urlname:"add" as add_url %}
+    <a href="{{ add_url }}"
+       class="addlink bg-primary-600 flex flex-row gap-2 items-center px-4 py-2 rounded-default text-white hover:bg-primary-700"
+       title="Add {{ cl.opts.verbose_name }}">
+        <span class="material-symbols-outlined text-[18px]">add</span>
+        <span>Add {{ cl.opts.verbose_name|capfirst }}</span>
+    </a>
+{% elif nav_global_side %}
+    {{ nav_global_side }}
+{% endif %}
+<div class="relative" x-data="{ openHeaderUserLinks: false }">
+    <button type="button"
+            class="flex items-center gap-3 rounded-default px-3 py-2 hover:bg-base-100 dark:hover:bg-base-800"
+            x-on:click="openHeaderUserLinks = !openHeaderUserLinks"
+            x-bind:class="{'bg-base-100 dark:bg-base-800': openHeaderUserLinks}"
+            aria-label="Open account menu">
+        {% include "unfold/helpers/avatar.html" with user=request.user %}
+        <span class="text-left" style="display: block; min-width: 0;">
+            <span class="block font-semibold leading-tight text-important">{{ request.user.get_full_name|default:request.user.get_username }}</span>
+            {% if request.user.email %}<span class="block max-w-48 truncate text-subtle text-xs">{{ request.user.email }}</span>{% endif %}
+        </span>
+        <span class="material-symbols-outlined text-font-default-light dark:text-font-default-dark">expand_more</span>
+    </button>
+
+    <nav class="absolute bg-white border border-base-200 flex flex-col leading-none py-2 rounded-default shadow-lg right-0 top-[calc(100%+8px)] z-50 dark:bg-base-800 dark:border-base-700"
+         style="width: 19rem; min-width: 19rem; max-width: calc(100vw - 2rem);"
+         x-cloak x-show="openHeaderUserLinks" x-transition
+         x-on:click.outside="openHeaderUserLinks = false">
+        <div class="border-b border-base-200 mb-2 px-4 pb-3 dark:border-base-700">
+            <div class="font-semibold leading-tight text-important">{{ request.user.get_full_name|default:request.user.get_username }}</div>
+            {% if request.user.email %}<div class="mt-1 truncate text-subtle text-xs">{{ request.user.email }}</div>{% endif %}
+        </div>
+        {% include "unfold/helpers/theme_switch.html" %}
+        {% include "unfold/helpers/language_switch.html" %}
+        {% if extra_userlinks %}{{ extra_userlinks }}{% endif %}
+        {% include "unfold/helpers/account_links.html" %}
+    </nav>
+</div>
+</div>

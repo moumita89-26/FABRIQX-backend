@@ -1,0 +1,58 @@
+<div class="permission-matrix w-full" data-permission-matrix>
+    {% for group in widget.matrix_groups %}
+        <section class="border border-base-200 mb-6 overflow-hidden rounded-default dark:border-base-700">
+            <header class="bg-base-50 flex items-center justify-between px-4 py-3 dark:bg-base-800">
+                <strong class="text-font-important-light dark:text-font-important-dark">Manage {{ group.name }}</strong>
+                <label class="cursor-pointer flex gap-2 items-center text-sm">
+                    <input type="checkbox" class="rounded border-base-300" data-select-group>
+                    Select all
+                </label>
+            </header>
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead>
+                        <tr class="border-b border-base-200 dark:border-base-700">
+                            <th class="px-4 py-3 text-left">Menu</th>
+                            <th class="px-4 py-3 text-center">Read</th>
+                            <th class="px-4 py-3 text-center">Write</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in group.models %}
+                            <tr class="border-b border-base-100 last:border-b-0 dark:border-base-800">
+                                <td class="px-4 py-3">{{ row.model }}</td>
+                                <td class="px-4 py-3 text-center">
+                                    <input type="checkbox" class="rounded border-base-300" data-select-access {% if row.read_checked %}checked{% endif %}>
+                                    {% for permission in row.read_permissions %}
+                                        <input type="checkbox" name="{{ widget.name }}" value="{{ permission.id }}" class="hidden" data-access-permission {% if permission.checked %}checked{% endif %}>
+                                    {% endfor %}
+                                </td>
+                                <td class="px-4 py-3 text-center">
+                                    <input type="checkbox" class="rounded border-base-300" data-select-access {% if row.write_checked %}checked{% endif %}>
+                                    {% for permission in row.write_permissions %}
+                                        <input type="checkbox" name="{{ widget.name }}" value="{{ permission.id }}" class="hidden" data-access-permission {% if permission.checked %}checked{% endif %}>
+                                    {% endfor %}
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    {% endfor %}
+</div>
+<script>
+document.addEventListener("change", function (event) {
+    if (event.target.matches("[data-select-group]")) {
+        event.target.closest("section").querySelectorAll("[data-select-access]").forEach(function (checkbox) {
+            checkbox.checked = event.target.checked;
+            checkbox.dispatchEvent(new Event("change", {bubbles: true}));
+        });
+    }
+    if (event.target.matches("[data-select-access]")) {
+        event.target.closest("td").querySelectorAll("[data-access-permission]").forEach(function (checkbox) {
+            checkbox.checked = event.target.checked;
+        });
+    }
+});
+</script>

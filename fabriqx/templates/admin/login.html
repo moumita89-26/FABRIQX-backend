@@ -1,0 +1,195 @@
+{% extends "unfold/layouts/skeleton.html" %}
+
+{% load i18n static %}
+
+{% block title %}{% translate "Log in" %} | {{ site_title }}{% endblock %}
+
+{% block bodyclass %}fabriqx-login{% endblock %}
+
+{% block extrastyle %}
+    {{ block.super }}
+    {{ form.media }}
+    <style>
+        .fabriqx-login {
+            background:
+                radial-gradient(circle at 15% 15%, rgba(255, 255, 255, .72), transparent 32rem),
+                radial-gradient(circle at 85% 85%, rgba(128, 86, 63, .18), transparent 30rem),
+                linear-gradient(135deg, #fbf7f3 0%, #ead9cc 48%, #d9bda8 100%);
+            color: #321e18;
+            min-height: 100vh;
+        }
+
+        .fabriqx-login-shell {
+            align-items: center;
+            display: flex;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 2rem 1rem;
+        }
+
+        .fabriqx-login-card {
+            background: rgba(255, 255, 255, .94);
+            border: 1px solid rgba(159, 115, 88, .24);
+            border-radius: 1.25rem;
+            box-shadow: 0 1.5rem 4rem rgba(72, 43, 32, .18);
+            max-width: 27rem;
+            padding: 2.25rem;
+            width: 100%;
+        }
+
+        .fabriqx-login-logo {
+            border: 1px solid #ead9cc;
+            border-radius: 1rem;
+            box-shadow: 0 .5rem 1.25rem rgba(72, 43, 32, .12);
+            display: block;
+            height: 6rem;
+            margin: 0 auto 1.25rem;
+            object-fit: cover;
+            width: 6rem;
+        }
+
+        .fabriqx-login-card h1 {
+            color: #482b20;
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin: 0;
+            text-align: center;
+        }
+
+        .fabriqx-login-subtitle {
+            color: #9f7358;
+            margin: .4rem 0 1.75rem;
+            text-align: center;
+        }
+
+        .fabriqx-login-field { margin-bottom: 1.1rem; }
+        .fabriqx-login-field label {
+            color: #482b20;
+            display: block;
+            font-size: .875rem;
+            font-weight: 600;
+            margin-bottom: .45rem;
+        }
+
+        .fabriqx-login-field input {
+            background: #fff;
+            border: 1px solid #d9bda8 !important;
+            border-radius: .75rem !important;
+            box-sizing: border-box;
+            color: #321e18;
+            min-height: 3rem;
+            outline: none;
+            padding: .75rem 1rem !important;
+            transition: border-color .15s ease, box-shadow .15s ease;
+            width: 100%;
+        }
+
+        .fabriqx-login-field input:focus {
+            border-color: #aa5d1d !important;
+            box-shadow: 0 0 0 3px rgba(170, 93, 29, .13);
+        }
+
+        .fabriqx-login-submit {
+            background: #aa5d1d;
+            border: 0;
+            border-radius: .75rem;
+            color: #fff;
+            cursor: pointer;
+            font-size: .95rem;
+            font-weight: 700;
+            min-height: 3rem;
+            transition: background .15s ease, transform .15s ease;
+            width: 100%;
+        }
+
+        .fabriqx-login-submit:hover { background: #88451c; }
+        .fabriqx-login-submit:active { transform: translateY(1px); }
+
+        .fabriqx-login-reset {
+            color: #80563f;
+            display: block;
+            font-size: .875rem;
+            margin-top: 1.25rem;
+            text-align: center;
+            text-decoration: none;
+        }
+        .fabriqx-login-reset:hover { color: #60321e; text-decoration: underline; }
+
+        .fabriqx-login-error {
+            background: #fff1f0;
+            border: 1px solid #fecaca;
+            border-radius: .75rem;
+            color: #b42318;
+            font-size: .875rem;
+            margin-bottom: 1rem;
+            padding: .75rem 1rem;
+        }
+
+        .fabriqx-login-field-error {
+            color: #b42318;
+            font-size: .8rem;
+            margin-top: .35rem;
+        }
+
+        .fabriqx-login-footer {
+            color: #80563f;
+            font-size: .75rem;
+            margin-top: 1.5rem;
+            text-align: center;
+        }
+
+        @media (max-width: 480px) {
+            .fabriqx-login-card { border-radius: 1rem; padding: 1.5rem; }
+        }
+    </style>
+{% endblock %}
+
+{% block base %}
+    <main class="fabriqx-login-shell">
+        <section class="fabriqx-login-card" aria-labelledby="login-title">
+            <img class="fabriqx-login-logo" src="{% static 'branding/fabriqx-logo.jpeg' %}" alt="FABRIQX logo">
+            <h1 id="login-title">Welcome back</h1>
+            <p class="fabriqx-login-subtitle">Sign in to FABRIQX Administration</p>
+
+            {% if form.errors or form.non_field_errors %}
+                <div class="fabriqx-login-error" role="alert">
+                    Your username or password is incorrect. Please try again.
+                </div>
+            {% endif %}
+
+            {% if user.is_authenticated %}
+                <div class="fabriqx-login-error" role="alert">
+                    This account does not have permission to access the admin panel.
+                </div>
+            {% endif %}
+
+            <form action="{{ app_path }}" method="post" id="login-form">
+                {% csrf_token %}
+                <div class="fabriqx-login-field">
+                    <label for="{{ form.username.id_for_label }}">Username or email</label>
+                    {{ form.username }}
+                    {% for error in form.username.errors %}<p class="fabriqx-login-field-error">{{ error }}</p>{% endfor %}
+                </div>
+
+                <div class="fabriqx-login-field">
+                    <label for="{{ form.password.id_for_label }}">Password</label>
+                    {{ form.password }}
+                    {% for error in form.password.errors %}<p class="fabriqx-login-field-error">{{ error }}</p>{% endfor %}
+                </div>
+
+                {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+                <button class="fabriqx-login-submit" type="submit">Log in</button>
+
+                {% url 'admin_password_reset' as password_reset_url %}
+                {% url 'admin:admin_password_reset' as unfold_password_reset_url %}
+                {% if password_reset_url or unfold_password_reset_url %}
+                    <a class="fabriqx-login-reset" href="{{ password_reset_url|default:unfold_password_reset_url }}">
+                        Forgot your password?
+                    </a>
+                {% endif %}
+            </form>
+
+            <p class="fabriqx-login-footer">&copy; {% now "Y" %} FABRIQX. Crafted for every celebration.</p>
+        </section>
+    </main>
+{% endblock %}

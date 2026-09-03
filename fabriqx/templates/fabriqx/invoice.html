@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Invoice {{ invoice.number }}</title>
+    <style>
+        body { color: #321e18; font: 14px Arial, sans-serif; margin: 40px; }
+        header { align-items: center; border-bottom: 2px solid #cf7e27; display: flex; justify-content: space-between; padding-bottom: 20px; }
+        h1 { margin: 0; } table { border-collapse: collapse; margin-top: 24px; width: 100%; }
+        th, td { border-bottom: 1px solid #ead9cc; padding: 10px; text-align: left; }
+        .totals { margin-left: auto; margin-top: 24px; width: 320px; }
+        .grand { font-size: 18px; font-weight: bold; }
+        @media print { .print-button { display: none; } body { margin: 10mm; } }
+    </style>
+</head>
+<body>
+<button class="print-button" onclick="window.print()">Print / Save as PDF</button>
+<header><div><h1>FABRIQX</h1><div>Crafted for every celebration</div></div><div><strong>Invoice {{ invoice.number }}</strong><br>{{ invoice.issued_at|date:"d M Y" }}</div></header>
+<p><strong>Order:</strong> {{ order.number }}<br><strong>Customer:</strong> {{ order.email }} · {{ order.phone }}</p>
+<table><thead><tr><th>Item</th><th>SKU</th><th>Qty</th><th>Unit price</th><th>Total</th></tr></thead><tbody>
+{% for item in order.items.all %}<tr><td>{{ item.product_name }}</td><td>{{ item.sku }}</td><td>{{ item.quantity }}</td><td>{{ item.unit_price }}</td><td>{{ item.total }}</td></tr>{% endfor %}
+</tbody></table>
+<table class="totals"><tr><td>Subtotal</td><td>{{ order.subtotal }}</td></tr><tr><td>Discount</td><td>-{{ order.discount_total }}</td></tr><tr><td>Shipping</td><td>{{ order.shipping_total }}</td></tr><tr><td>Tax</td><td>{{ order.tax_total }}</td></tr><tr class="grand"><td>Total</td><td>{{ order.grand_total }}</td></tr></table>
+</body>
+</html>

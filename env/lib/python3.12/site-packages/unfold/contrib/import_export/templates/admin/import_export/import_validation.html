@@ -1,0 +1,84 @@
+{% load i18n unfold %}
+
+{% block validation_errors %}
+    {% capture as import_error silent %}
+        {% trans "Some rows failed to validate" %}. {% trans "Please correct these errors in your data where possible, then reupload it using the form above." %}
+    {% endcapture %}
+
+    <div class="mt-8">
+        {% include "unfold/helpers/messages/error.html" with error=import_error %}
+    </div>
+
+    <div class="border border-base-200 mb-3 overflow-auto scrollbar-default w-full rounded-default shadow-xs dark:border-base-800">
+        <table class="import-preview border-base-200 border-spacing-none border-separate w-full lg:border lg:rounded-default lg:shadow-xs lg:dark:border-base-800">
+            <thead class="text-important whitespace-nowrap">
+                <tr class="*:font-semibold *:px-3 *:py-2 *:text-left">
+                    <th>
+                        {% trans "Row" %}
+                    </th>
+
+                    {% for field in result.diff_headers %}
+                        <th>
+                            {{ field }}
+                        </th>
+                    {% endfor %}
+                </tr>
+            </thead>
+
+
+            {% for row in result.invalid_rows %}
+                <tbody>
+                    {% if row.non_field_specific_errors or row.field_specific_errors %}
+                        <tr>
+                            <td colspan="100%" class="border-t border-base-200 p-3 dark:border-base-800">
+                                <div class="flex flex-col gap-2 *:mb-0">
+                                    {% for field_name, error_list in row.field_specific_errors.items %}
+                                        {% capture as error_message silent %}
+                                            <div class="flex flex-row gap-1">
+                                                <span class="font-semibold">{{ field_name }}:</span>
+
+                                                <ul>
+                                                    {% for error in error_list %}
+                                                        <li>{{ error }}</li>
+                                                    {% endfor %}
+                                                </ul>
+                                            </div>
+                                        {% endcapture %}
+
+                                        {% include "unfold/helpers/messages/error.html" with error=error_message %}
+                                    {% endfor %}
+
+                                    {% for error in row.non_field_specific_errors %}
+                                        {% capture as error_message silent %}
+                                            <div class="flex flex-row gap-1">
+                                                <span class="font-semibold">{% trans "Non field specific" %}:</span>
+
+                                                <span>
+                                                    {{ error }}
+                                                </span>
+                                            </div>
+                                        {% endcapture %}
+
+                                        {% include "unfold/helpers/messages/error.html" with error=error_message %}
+                                    {% endfor %}
+                                </div>
+                            </td>
+                        </tr>
+                    {% endif %}
+
+                    <tr class="data-row *:border-t *:border-base-200 *:font-normal *:px-3 *:py-2 *:text-left *:dark:border-base-800">
+                        <td>
+                            {{ row.number }}
+                        </td>
+
+                        {% for field in row.values %}
+                            <td>
+                                {{ field }}
+                            </td>
+                        {% endfor %}
+                    </tr>
+                </tbody>
+            {% endfor %}
+        </table>
+    </div>
+{% endblock %}

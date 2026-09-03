@@ -1,0 +1,47 @@
+{% load admin_urls i18n import_export_tags unfold %}
+
+{% block preview %}
+    <div class="border border-base-200 mb-3 overflow-auto scrollbar-default w-full rounded-default shadow-xs dark:border-base-800">
+        <table class="import-preview-table border-spacing-none border-separate w-full">
+            <thead class="text-important whitespace-nowrap">
+                <tr class="*:font-semibold *:px-3 *:py-2 *:text-left">
+                    <th></th>
+
+                    {% for field in result.diff_headers %}
+                        <th>
+                            {{ field }}
+                        </th>
+                    {% endfor %}
+                </tr>
+            </thead>
+
+            <tbody>
+                {% for row in result.valid_rows %}
+                    <tr class="data-row {{ row.import_type }} {% cycle '' 'bg-base-50 dark:bg-white/[.02]' %} *:border-t *:border-base-200 *:font-normal *:px-3 *:py-2 *:text-left *:dark:border-base-800">
+                        <td class="h-[45px]">
+                            {% if row.import_type == 'new' %}
+                                {% trans "New" as label_title %}
+                                {% include "unfold/helpers/label.html" with text=label_title variant="success" %}
+                            {% elif row.import_type == 'skip' %}
+                                {% trans "Skipped" as label_title %}
+                                {% include "unfold/helpers/label.html" with text=label_title variant="warning" %}
+                            {% elif row.import_type == 'delete' %}
+                                {% trans "Delete" as label_title %}
+                                {% include "unfold/helpers/label.html" with text=label_title variant="danger" %}
+                            {% elif row.import_type == 'update' %}
+                                {% trans "Update" as label_title %}
+                                {% include "unfold/helpers/label.html" with text=label_title variant="info" %}
+                            {% endif %}
+                        </td>
+
+                        {% for field in row.diff %}
+                            <td>
+                                {{ field }}
+                            </td>
+                        {% endfor %}
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+{% endblock %}

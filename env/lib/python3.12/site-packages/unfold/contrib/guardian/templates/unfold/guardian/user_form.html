@@ -1,0 +1,73 @@
+{% load i18n unfold %}
+
+<form method="post" novalidate>
+    {% csrf_token %}
+
+    <h2 class="font-semibold text-base tracking-tight mb-3 text-important">
+        {% trans "User permissions" %}
+    </h2>
+
+    {% if users_perms.items %}
+        <div class="border border-base-200 border-spacing-none mb-3 overflow-auto scrollbar-default w-full rounded-default shadow-xs dark:border-base-800">
+            <table id="user-permissions" class="border-spacing-none border-separate w-full">
+                <thead class="text-important whitespace-nowrap">
+                    <tr class="*:font-semibold *:px-3 *:py-2 *:text-left">
+                        <th>
+                            {% trans "User" %}
+                        </th>
+
+                        {% for perm in model_perms %}
+                            <th>
+                                {{ perm.name }}
+                            </th>
+                        {% endfor %}
+
+                        <th></th>
+                    </tr>
+                </thead>
+
+                <tbody>
+                    {% for user, user_perms in users_perms.items %}
+                        <tr class="data-row {% cycle '' 'bg-base-50 dark:bg-white/[.02]' %} *:border-t *:border-base-200 *:font-normal *:px-3 *:py-2 *:text-left *:dark:border-base-800">
+                            <td class="h-[45px]">
+                                <span>
+                                    {{ user }}
+                                </span>
+                            </td>
+
+                            {% for perm in model_perms %}
+                                <td>
+                                    {% if perm.codename in user_perms %}
+                                        {% include "unfold/helpers/boolean.html" with value=True %}
+                                    {% else %}
+                                        {% include "unfold/helpers/boolean.html" with value=False %}
+                                    {% endif %}
+                                </td>
+                            {% endfor %}
+
+                            <td class="w-px">
+                                {% capture as href silent %}user-manage/{{ user.id|safe }}/{% endcapture %}
+
+                                {% component "unfold/components/button.html" with size="xs" variant="default" href=href %}
+                                    {% trans "Edit" %}
+                                {% endcomponent %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    {% endif %}
+
+    <div class="border border-base-200 overflow-hidden rounded-default p-3 shadow-xs dark:border-base-800">
+        {% for field in user_form %}
+            {% include "admin/guardian/model/field.html" %}
+        {% endfor %}
+
+        <div class="border-t border-base-200 flex justify-end -mx-3 pt-3 px-3 dark:border-base-800">
+            {% component "unfold/components/button.html" with submit=1 name="submit_manage_user" %}
+                {% trans "Manage user" %}
+            {% endcomponent %}
+        </div>
+    </div>
+</form>

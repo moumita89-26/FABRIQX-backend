@@ -1,0 +1,26 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block title %}Import products | {{ site_title }}{% endblock %}
+{% block content_title %}Import products{% endblock %}
+
+{% block content %}
+<div class="max-w-3xl">
+    <div class="bg-white border border-base-200 p-6 rounded-default shadow-xs dark:bg-base-900 dark:border-base-700">
+        <p class="mb-2 text-subtle">Upload CSV or XLSX. Rows are streamed and processed in batches of 500. Repeating a product slug adds or updates its variants.</p>
+        <p class="mb-2 text-subtle">For third-party images, put the complete public HTTP/HTTPS link in <strong>image_url</strong>. The importer downloads and validates the image, then saves it into local media storage.</p>
+        <p class="mb-5 text-subtle"><strong>image_path</strong> is only for an image that already exists under this server's MEDIA_ROOT. Leave it blank when using <strong>image_url</strong>.</p>
+        <form method="post" enctype="multipart/form-data">
+            {% csrf_token %}
+            <label class="block font-semibold mb-2" for="id_import_file">Product file</label>
+            <input id="id_import_file" name="import_file" type="file" accept=".csv,.xlsx" required
+                   class="bg-white border border-base-200 block mb-5 px-3 py-2 rounded-default w-full dark:bg-base-900 dark:border-base-700">
+            <div class="flex gap-3">
+                <button type="submit" class="bg-primary-600 px-4 py-2 rounded-default text-white hover:bg-primary-700">Import products</button>
+                <a href="{% url 'admin:products_product_download_product_sample' %}" class="border border-base-200 px-4 py-2 rounded-default dark:border-base-700">Download sample</a>
+                <a href="{% url 'admin:products_product_changelist' %}" class="px-4 py-2">Cancel</a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
