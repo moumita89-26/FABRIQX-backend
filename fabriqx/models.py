@@ -312,22 +312,46 @@ class Coupon(TimeStampedModel):
 
 
 class InfluencerProfile(TimeStampedModel):
-    class CommissionType(models.TextChoices):
-        PERCENTAGE = "percentage", "Percentage"
-        FIXED = "fixed", "Fixed amount"
-
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="influencer_profile")
     affiliate_id = models.CharField(max_length=40, unique=True, blank=True)
     phone = models.CharField(max_length=30, blank=True)
     profile_image = models.ImageField(upload_to="influencers/profiles/", blank=True)
     address = models.JSONField(default=dict, blank=True)
-    commission_type = models.CharField(max_length=20, choices=CommissionType.choices, default=CommissionType.PERCENTAGE)
-    commission_rate = models.DecimalField("Commission percentage (%)", max_digits=5, decimal_places=2, default=0, validators=[MinValueValidator(0), MaxValueValidator(100)])
-    commission_fixed_amount = models.DecimalField("Fixed commission amount", max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(0)])
     is_active = models.BooleanField(default=True)
 
     def __str__(self):
         return f"{self.user.get_full_name() or self.user.username} ({self.affiliate_id})"
+
+    def save(self, *args, **kwargs):
+        self.affiliate_id = self.affiliate_id or reference("INF")
+        # Optional JSON form fields are cleaned to None when left empty, but
+        # this column deliberately remains NOT NULL in the database.
+        if self.address is None:
+            self.address = {}
+        super().save(*args, **kwargs)
+
+
+class SiteSettings(TimeStampedModel):
+    class CommissionType(models.TextChoices):
+        PERCENTAGE = "percentage", "Percentage"
+        FIXED = "fixed", "Fixed amount"
+
+    commission_type = models.CharField(max_length=20, choices=CommissionType.choices, default=CommissionType.PERCENTAGE)
+    commission_rate = models.DecimalField("Commission percentage (%)", max_digits=5, decimal_places=2, default=10, validators=[MinValueValidator(0), MaxValueValidator(100)])
+    commission_fixed_amount = models.DecimalField("Fixed commission amount", max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(0)])
+    legacy_influencer_commissions = models.JSONField(default=dict, blank=True, editable=False)
+
+    class Meta:
+        verbose_name = "Site settings"
+        verbose_name_plural = "Site settings"
+
+    def __str__(self):
+        return "Site settings"
+
+    @classmethod
+    def load(cls):
+        settings_object, _ = cls.objects.get_or_create(pk=1)
+        return settings_object
 
     def clean(self):
         if self.commission_type == self.CommissionType.PERCENTAGE and self.commission_rate <= 0:
@@ -336,11 +360,11 @@ class InfluencerProfile(TimeStampedModel):
             raise ValidationError({"commission_fixed_amount": "Enter a fixed amount greater than zero."})
 
     def save(self, *args, **kwargs):
-        self.affiliate_id = self.affiliate_id or reference("INF")
-        # Optional JSON form fields are cleaned to None when left empty, but
-        # this column deliberately remains NOT NULL in the database.
-        if self.address is None:
-            self.address = {}
+        self.pk = 1
+        if self.commission_type == self.CommissionType.PERCENTAGE:
+            self.commission_fixed_amount = 0
+        else:
+            self.commission_rate = 0
         super().save(*args, **kwargs)
 
 
@@ -528,12 +552,8 @@ class InfluencerCommission(TimeStampedModel):
         return f"{self.influencer} — {self.commission_amount}"
 
     def clean(self):
-        if self.influencer.commission_type == InfluencerProfile.CommissionType.FIXED:
-            expected = self.influencer.commission_fixed_amount.quantize(Decimal("0.01"))
-        else:
-            expected = (self.eligible_amount * self.rate / Decimal("100")).quantize(Decimal("0.01"))
-        if self.commission_amount != expected:
-            raise ValidationError({"commission_amount": f"Commission must be {expected}."})
+        if self.commission_amount < 0:
+            raise ValidationError({"commission_amount": "Commission cannot be negative."})
 
 
 class Review(TimeStampedModel):

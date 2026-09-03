@@ -19,7 +19,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from .models import BrandLogo, BrandLogoSection, Category, Coupon, CustomerProfile, FooterSocialLink, FooterSocialSection, GiftSection, GiftSectionFeature, GiftSectionStatistic, InfluencerCommission, InfluencerProfile, Invoice, NewsletterSettings, NewsletterSubscription, OfferBanner, OfferGridItem, OfferGridSection, Order, OrderItem, Page, Payment, Product, ProductVariant, UserRole
+from .models import BrandLogo, BrandLogoSection, Category, Coupon, CustomerProfile, FooterSocialLink, FooterSocialSection, GiftSection, GiftSectionFeature, GiftSectionStatistic, InfluencerCommission, InfluencerProfile, Invoice, NewsletterSettings, NewsletterSubscription, OfferBanner, OfferGridItem, OfferGridSection, Order, OrderItem, Page, Payment, Product, ProductVariant, SiteSettings, UserRole
 
 
 class ModelTests(TestCase):
@@ -67,7 +67,7 @@ class ModelTests(TestCase):
 
     def test_order_invoice_and_commission_references(self):
         influencer_user = get_user_model().objects.create_user("influencer")
-        influencer = InfluencerProfile.objects.create(user=influencer_user, commission_rate=10)
+        influencer = InfluencerProfile.objects.create(user=influencer_user)
         order = Order.objects.create(customer=self.customer, email="customer@example.com", phone="1", influencer=influencer)
         invoice = Invoice.objects.create(order=order)
         commission = InfluencerCommission(influencer=influencer, order=order, rate=10, eligible_amount=Decimal("1000.00"), commission_amount=Decimal("100.00"))
@@ -80,7 +80,7 @@ class ModelTests(TestCase):
 
     def test_checkout_affiliate_code_links_order_to_active_influencer(self):
         influencer_user = get_user_model().objects.create_user("affiliate")
-        influencer = InfluencerProfile.objects.create(user=influencer_user, commission_rate=10)
+        influencer = InfluencerProfile.objects.create(user=influencer_user)
         order = Order.objects.create(customer=self.customer, email="customer@example.com", phone="1", affiliate_code=influencer.affiliate_id.lower())
         self.assertEqual(order.influencer, influencer)
         self.assertEqual(order.affiliate_code, influencer.affiliate_id)
@@ -277,6 +277,13 @@ class AdminTests(TestCase):
         self.assertContains(add_page, "Admin / Staff")
         self.assertContains(add_page, "Back to list")
         self.assertContains(add_page, reverse("admin:auth_user_changelist"))
+        self.assertNotContains(add_page, "Password-based authentication")
+        add_form = add_page.context["adminform"].form
+        self.assertTrue(add_form.fields["password1"].widget.attrs["class"])
+        self.assertEqual(
+            add_form.fields["password1"].widget.attrs["class"],
+            add_form.fields["password2"].widget.attrs["class"],
+        )
         self.assertNotContains(add_page, '<option value="customer">', html=False)
         self.assertNotContains(add_page, '<option value="influencer">', html=False)
 
@@ -285,7 +292,6 @@ class AdminTests(TestCase):
             {
                 "username": "new_admin",
                 "email": "new-admin@example.com",
-                "usable_password": "true",
                 "password1": "StrongPass123!",
                 "password2": "StrongPass123!",
                 "permissions": [view_banner.pk],
@@ -296,9 +302,19 @@ class AdminTests(TestCase):
         self.assertEqual(response.status_code, 302)
         user = get_user_model().objects.get(username="new_admin")
         self.assertTrue(user.is_staff)
+        self.assertTrue(user.is_active)
+        self.assertTrue(user.has_usable_password())
+        self.assertTrue(user.check_password("StrongPass123!"))
         self.assertEqual(user.email, "new-admin@example.com")
         self.assertEqual(user.fabriqx_role.role, UserRole.Role.ADMIN)
         self.assertEqual(list(user.user_permissions.all()), [view_banner])
+
+        self.client.logout()
+        self.assertTrue(self.client.login(username="new_admin", password="StrongPass123!"))
+        self.assertEqual(
+            self.client.get(reverse("admin:content_management_banner_changelist"), HTTP_HOST="127.0.0.1").status_code,
+            200,
+        )
 
     def test_new_admin_account_receives_access_email(self):
         with self.captureOnCommitCallbacks(execute=True):
@@ -307,7 +323,6 @@ class AdminTests(TestCase):
                 {
                     "username": "emailed_admin",
                     "email": "emailed-admin@example.com",
-                    "usable_password": "true",
                     "password1": "TemporaryPass123!",
                     "password2": "TemporaryPass123!",
                     "permissions": [],
@@ -325,6 +340,12 @@ class AdminTests(TestCase):
         self.assertIn(reverse("admin:login"), access_email.body)
         self.assertIn(reverse("admin:password_change"), access_email.body)
         self.assertIn("reset your password later", access_email.body)
+        self.assertEqual(len(access_email.alternatives), 1)
+        html_email, mime_type = access_email.alternatives[0]
+        self.assertEqual(mime_type, "text/html")
+        self.assertIn("Your admin account is ready", html_email)
+        self.assertIn("Open admin panel", html_email)
+        self.assertIn("TemporaryPass123!", html_email)
 
     def test_staff_only_sees_and_accesses_permitted_admin_models(self):
         staff = get_user_model().objects.create_user("limited_staff", password="pass", is_staff=True)
@@ -629,35 +650,47 @@ class AdminTests(TestCase):
         self.assertEqual(self.client.get(add_url, HTTP_HOST="127.0.0.1").status_code, 403)
 
     def test_admin_can_create_influencer_with_credentials(self):
-        with self.captureOnCommitCallbacks(execute=True):
-            response = self.client.post(
-                reverse("admin:influencers_influencerprofile_add"),
-                {
-                    "username": "creator_one",
-                    "email": "creator@example.com",
-                    "password": "StrongPass123!",
-                    "confirm_password": "StrongPass123!",
-                    "phone": "9999999999",
-                    "address_line_1": "12 MG Road",
-                    "address_line_2": "Near Central Mall",
-                    "address_city": "Bengaluru",
-                    "address_state": "Karnataka",
-                    "address_postal_code": "560001",
-                    "address_country": "India",
-                    "social_handle": "@creator_one",
-                    "commission_rate": "12.50",
-                    "commission_type": "percentage",
-                    "commission_fixed_amount": "0",
-                    "is_active": "on",
-                    "_save": "Save",
-                },
-                HTTP_HOST="127.0.0.1",
-            )
+        photo = SimpleUploadedFile(
+            "creator.gif",
+            b"GIF87a\x01\x00\x01\x00\x80\x01\x00\x00\x00\x00ccc,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;",
+            content_type="image/gif",
+        )
+        with tempfile.TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(
+                    reverse("admin:influencers_influencerprofile_add"),
+                    {
+                        "username": "creator_one",
+                        "first_name": "Creator",
+                        "last_name": "One",
+                        "email": "creator@example.com",
+                        "password": "StrongPass123!",
+                        "confirm_password": "StrongPass123!",
+                        "phone": "9999999999",
+                        "profile_image": photo,
+                        "address_line_1": "12 MG Road",
+                        "address_line_2": "Near Central Mall",
+                        "address_city": "Bengaluru",
+                        "address_state": "Karnataka",
+                        "address_postal_code": "560001",
+                        "address_country": "India",
+                        "social_handle": "@creator_one",
+                        "commission_rate": "12.50",
+                        "commission_type": "percentage",
+                        "commission_fixed_amount": "0",
+                        "is_active": "on",
+                        "_save": "Save",
+                    },
+                    HTTP_HOST="127.0.0.1",
+                )
         self.assertEqual(response.status_code, 302)
         user = get_user_model().objects.get(username="creator_one")
         self.assertTrue(user.check_password("StrongPass123!"))
+        self.assertEqual(user.first_name, "Creator")
+        self.assertEqual(user.last_name, "One")
         self.assertEqual(user.fabriqx_role.role, UserRole.Role.INFLUENCER)
         self.assertTrue(user.influencer_profile.affiliate_id.startswith("INF-"))
+        self.assertTrue(user.influencer_profile.profile_image.name.startswith("influencers/profiles/creator"))
         self.assertEqual(user.influencer_profile.address, {
             "line1": "12 MG Road",
             "line2": "Near Central Mall",
@@ -673,6 +706,21 @@ class AdminTests(TestCase):
         self.assertIn("Temporary password: StrongPass123!", onboarding_email.body)
         self.assertIn(user.influencer_profile.affiliate_id, onboarding_email.body)
         self.assertIn("/influencer/login", onboarding_email.body)
+        self.assertEqual(len(onboarding_email.alternatives), 1)
+        html_email, mime_type = onboarding_email.alternatives[0]
+        self.assertEqual(mime_type, "text/html")
+        self.assertIn("Welcome to FABRIQX, Creator One", html_email)
+        self.assertIn("Sign in to your workspace", html_email)
+        self.assertIn("StrongPass123!", html_email)
+
+        change_response = self.client.get(
+            reverse("admin:influencers_influencerprofile_change", args=(user.influencer_profile.pk,)),
+            HTTP_HOST="127.0.0.1",
+        )
+        self.assertContains(change_response, 'name="address_line_1" value="12 MG Road"', html=False)
+        self.assertContains(change_response, 'name="address_city" value="Bengaluru"', html=False)
+        self.assertContains(change_response, 'name="first_name" value="Creator"', html=False)
+        self.assertContains(change_response, 'name="last_name" value="One"', html=False)
 
     def test_influencer_email_must_be_unique_case_insensitively(self):
         get_user_model().objects.create_user("existing", email="Creator@Example.com")
@@ -695,48 +743,32 @@ class AdminTests(TestCase):
         self.assertContains(response, "An account with this email address already exists.")
         self.assertFalse(get_user_model().objects.filter(username="another_creator").exists())
 
-    def test_influencer_supports_fixed_and_percentage_commission(self):
-        user = get_user_model().objects.create_user("fixed_affiliate")
-        profile = InfluencerProfile(user=user, commission_type=InfluencerProfile.CommissionType.FIXED, commission_fixed_amount=Decimal("250"))
-        profile.full_clean()
+    def test_site_settings_supports_fixed_and_percentage_commission(self):
+        settings_object = SiteSettings(commission_type=SiteSettings.CommissionType.FIXED, commission_fixed_amount=Decimal("250"))
+        settings_object.full_clean()
 
-    def test_influencer_admin_switches_commission_fields_dynamically(self):
-        add_url = reverse("admin:influencers_influencerprofile_add")
-        response = self.client.get(add_url, HTTP_HOST="127.0.0.1")
+    def test_site_settings_admin_switches_commission_fields_dynamically(self):
+        settings_object = SiteSettings.load()
+        change_url = reverse("admin:fabriqx_sitesettings_change", args=(settings_object.pk,))
+        list_response = self.client.get(
+            reverse("admin:fabriqx_sitesettings_changelist"),
+            HTTP_HOST="127.0.0.1",
+        )
+        self.assertRedirects(list_response, change_url)
+        response = self.client.get(change_url, HTTP_HOST="127.0.0.1")
         self.assertContains(response, "commission_type == &#x27;percentage&#x27;")
         self.assertContains(response, "commission_type == &#x27;fixed&#x27;")
+        self.assertNotContains(response, "Back to list")
 
-        response = self.client.post(add_url, {
-            "username": "fixed_creator",
-            "email": "fixed@example.com",
-            "password": "StrongPass123!",
-            "confirm_password": "StrongPass123!",
-            "phone": "9999999999",
+        response = self.client.post(change_url, {
             "commission_type": "fixed",
             "commission_fixed_amount": "250.00",
-            "is_active": "on",
             "_save": "Save",
         }, HTTP_HOST="127.0.0.1")
-        self.assertEqual(response.status_code, 302)
-        profile = InfluencerProfile.objects.get(user__username="fixed_creator")
-        self.assertEqual(profile.commission_fixed_amount, Decimal("250.00"))
-        self.assertEqual(profile.commission_rate, Decimal("0"))
-        profile.commission_type = InfluencerProfile.CommissionType.PERCENTAGE
-        profile.commission_rate = Decimal("7.50")
-        profile.full_clean()
-        profile.save()
-        list_response = self.client.get(
-            reverse("admin:influencers_influencerprofile_changelist"),
-            HTTP_HOST="127.0.0.1",
-        )
-        self.assertContains(list_response, "7.5%")
-        profile.commission_rate = Decimal("5.00")
-        profile.save()
-        list_response = self.client.get(
-            reverse("admin:influencers_influencerprofile_changelist"),
-            HTTP_HOST="127.0.0.1",
-        )
-        self.assertContains(list_response, ">5%</td>", html=False)
+        self.assertRedirects(response, change_url)
+        settings_object.refresh_from_db()
+        self.assertEqual(settings_object.commission_fixed_amount, Decimal("250.00"))
+        self.assertEqual(settings_object.commission_rate, Decimal("0"))
 
     def test_influencer_form_has_no_payment_or_tax_fields(self):
         response = self.client.get(reverse("admin:influencers_influencerprofile_add"), HTTP_HOST="127.0.0.1")
@@ -944,7 +976,7 @@ class CustomerApiTests(TestCase):
             "dashboard_creator", email="dashboard@example.com", password="CreatorPass123!"
         )
         influencer = InfluencerProfile.objects.create(
-            user=influencer_user, phone="9000000000", commission_rate=Decimal("10")
+            user=influencer_user, phone="9000000000"
         )
         customer_user = get_user_model().objects.create_user("referral_customer", email="referral@example.com")
         customer = CustomerProfile.objects.create(user=customer_user)
@@ -985,6 +1017,40 @@ class CustomerApiTests(TestCase):
         self.assertEqual(profile.data["address"]["city"], "Delhi")
         self.assertEqual(profile.data["affiliate_id"], influencer.affiliate_id)
 
+        influencer.address = {"line1": "12 MG Road", "city": "Delhi", "country": "India"}
+        influencer.save(update_fields=("address", "updated_at"))
+        profile = self.client.patch(
+            "/api/v1/influencer/profile/",
+            {"address": {"city": "Mumbai"}},
+            format="json",
+        )
+        self.assertEqual(profile.status_code, 200, profile.data)
+        self.assertEqual(profile.data["address"], {"line1": "12 MG Road", "city": "Mumbai", "country": "India"})
+
+        displayed_profile = self.client.get("/api/v1/influencer/profile/")
+        self.assertEqual(displayed_profile.status_code, 200, displayed_profile.data)
+        self.assertEqual(displayed_profile.data["address"], profile.data["address"])
+
+        photo = SimpleUploadedFile(
+            "updated.gif",
+            b"GIF87a\x01\x00\x01\x00\x80\x01\x00\x00\x00\x00ccc,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;",
+            content_type="image/gif",
+        )
+        with tempfile.TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
+            profile = self.client.patch(
+                "/api/v1/influencer/profile/",
+                {"photo": photo},
+                format="multipart",
+            )
+            self.assertEqual(profile.status_code, 200, profile.data)
+            self.assertIn("/media/influencers/profiles/updated", profile.data["photo"])
+            self.assertIn("?v=", profile.data["photo"])
+            influencer.refresh_from_db()
+            self.assertTrue(influencer.profile_image.name.startswith("influencers/profiles/updated"))
+
+            displayed_profile = self.client.get("/api/v1/influencer/profile/")
+            self.assertEqual(displayed_profile.data["photo"], profile.data["photo"])
+
         dashboard = self.client.get("/api/v1/influencer/dashboard/")
         self.assertEqual(dashboard.status_code, 200, dashboard.data)
         self.assertEqual(dashboard.data["total_referred_orders"], 2)
@@ -1002,7 +1068,7 @@ class CustomerApiTests(TestCase):
         self.assertEqual(detail.status_code, 200, detail.data)
         self.assertEqual(detail.data["items"][0]["sku"], self.variant.sku)
         other_user = get_user_model().objects.create_user("other_creator", email="other-creator@example.com")
-        other_influencer = InfluencerProfile.objects.create(user=other_user, commission_rate=Decimal("5"))
+        other_influencer = InfluencerProfile.objects.create(user=other_user)
         other_order = Order.objects.create(
             customer=customer, email=customer_user.email, phone="9111111111",
             subtotal=Decimal("200"), grand_total=Decimal("200"), influencer=other_influencer,
@@ -1069,6 +1135,10 @@ class CustomerApiTests(TestCase):
         requested = self.client.post("/api/v1/auth/forgot-password/", {"email": "buyer@example.com"}, format="json")
         self.assertEqual(requested.status_code, 200)
         self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(len(mail.outbox[0].alternatives), 1)
+        reset_html, mime_type = mail.outbox[0].alternatives[0]
+        self.assertEqual(mime_type, "text/html")
+        self.assertIn("Reset my password", reset_html)
         reset_url = next(part for part in mail.outbox[0].body.split() if part.startswith("https://"))
         params = parse_qs(urlparse(reset_url).query)
         payload = {"uid": params["uid"][0], "token": params["token"][0], "new_password": "NewStrongPass456!", "confirm_password": "NewStrongPass456!"}
@@ -1089,7 +1159,7 @@ class CustomerApiTests(TestCase):
             email="creator-reset@example.com",
             password="OriginalPass123!",
         )
-        InfluencerProfile.objects.create(user=user, commission_rate=Decimal("10"))
+        InfluencerProfile.objects.create(user=user)
 
         requested = self.client.post(
             "/api/v1/auth/forgot-password/",
@@ -1115,11 +1185,58 @@ class CustomerApiTests(TestCase):
         )
         self.assertEqual(login.status_code, 200, login.data)
 
+    def test_customer_can_change_password_after_login(self):
+        self.register_customer()
+        rejected = self.client.post(
+            "/api/v1/auth/change-password/",
+            {
+                "current_password": "WrongPass123!",
+                "new_password": "NewCustomerPass456!",
+                "confirm_password": "NewCustomerPass456!",
+            },
+            format="json",
+        )
+        self.assertEqual(rejected.status_code, 400)
+
+        changed = self.client.post(
+            "/api/v1/auth/change-password/",
+            {
+                "current_password": "StrongPass123!",
+                "new_password": "NewCustomerPass456!",
+                "confirm_password": "NewCustomerPass456!",
+            },
+            format="json",
+        )
+        self.assertEqual(changed.status_code, 200, changed.data)
+        self.assertTrue(get_user_model().objects.get(email="buyer@example.com").check_password("NewCustomerPass456!"))
+
+    def test_influencer_can_change_password_after_login(self):
+        user = get_user_model().objects.create_user(
+            "creator_change",
+            email="creator-change@example.com",
+            password="OriginalPass123!",
+        )
+        InfluencerProfile.objects.create(user=user)
+        self.client.force_authenticate(user)
+
+        changed = self.client.post(
+            "/api/v1/auth/change-password/",
+            {
+                "current_password": "OriginalPass123!",
+                "new_password": "NewCreatorPass456!",
+                "confirm_password": "NewCreatorPass456!",
+            },
+            format="json",
+        )
+        self.assertEqual(changed.status_code, 200, changed.data)
+        user.refresh_from_db()
+        self.assertTrue(user.check_password("NewCreatorPass456!"))
+
     @override_settings(MARKETPLACE_WEBHOOK_SECRET="test-webhook-secret")
     def test_customer_cart_affiliate_checkout_payment_and_invoice(self):
         self.register_customer()
         influencer_user = get_user_model().objects.create_user("creator", "creator@example.com", "pass")
-        influencer = InfluencerProfile.objects.create(user=influencer_user, commission_rate=Decimal("10"))
+        influencer = InfluencerProfile.objects.create(user=influencer_user)
         coupon = Coupon.objects.create(
             code="CREATOR10", discount_type=Coupon.DiscountType.PERCENTAGE, discount_value=Decimal("10"),
             starts_at=timezone.now() - timezone.timedelta(days=1), expires_at=timezone.now() + timezone.timedelta(days=1),

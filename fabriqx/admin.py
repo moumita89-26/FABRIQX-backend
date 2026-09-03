@@ -17,6 +17,7 @@ from django.db.models import Q
 from django.core.mail import send_mail
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
+from django.template.loader import render_to_string
 from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html
@@ -430,6 +431,9 @@ class UserRoleAdmin(BaseAdmin):
 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
+            # Staff accounts created here always use a temporary password, so
+            # the optional usable/unusable password switch is not applicable.
+            self.fields.pop("usable_password", None)
             self.fields["permissions"].widget = UserRoleAdmin.PermissionMatrixWidget(self.fields["permissions"].queryset)
 
         def save(self, commit=True):
@@ -496,6 +500,9 @@ class FabriqxUserAdmin(BaseUserAdmin, ModelAdmin):
 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
+            password_input_classes = " ".join(INPUT_CLASSES)
+            for field_name in ("password1", "password2"):
+                self.fields[field_name].widget.attrs["class"] = password_input_classes
             self.fields["permissions"].widget = UserRoleAdmin.PermissionMatrixWidget(self.fields["permissions"].queryset)
 
     class UserWithRoleForm(BaseUserAdmin.form):
@@ -540,7 +547,7 @@ class FabriqxUserAdmin(BaseUserAdmin, ModelAdmin):
         ("Important dates", {"fields": ("last_login", "date_joined")}),
     )
     add_fieldsets = (
-        (None, {"fields": ("username", "email", "usable_password", "password1", "password2")}),
+        (None, {"fields": ("username", "email", "password1", "password2")}),
         ("Role and access permissions", {"fields": ("role", "permissions")}),
     )
 
@@ -616,6 +623,14 @@ class FabriqxUserAdmin(BaseUserAdmin, ModelAdmin):
             password_change_url = request.build_absolute_uri(reverse("admin:password_change"))
 
             def send_access_email():
+                context = {
+                    "display_name": display_name,
+                    "login_url": login_url,
+                    "username": username,
+                    "email": recipient,
+                    "temporary_password": initial_password,
+                    "password_change_url": password_change_url,
+                }
                 send_mail(
                     "Your FABRIQX Admin / Staff account",
                     (
@@ -633,6 +648,7 @@ class FabriqxUserAdmin(BaseUserAdmin, ModelAdmin):
                     ),
                     settings.DEFAULT_FROM_EMAIL,
                     [recipient],
+                    html_message=render_to_string("fabriqx/emails/admin_staff_access.html", context),
                 )
 
             transaction.on_commit(send_access_email)
@@ -733,6 +749,8 @@ class InfluencerAdmin(BaseAdmin):
     class InfluencerForm(forms.ModelForm):
         input_attrs = {"class": " ".join(INPUT_CLASSES)}
         username = forms.CharField(max_length=150, widget=forms.TextInput(attrs={**input_attrs, "autocomplete": "username"}))
+        first_name = forms.CharField(max_length=150, required=False, widget=forms.TextInput(attrs={**input_attrs, "autocomplete": "given-name"}))
+        last_name = forms.CharField(max_length=150, required=False, widget=forms.TextInput(attrs={**input_attrs, "autocomplete": "family-name"}))
         email = forms.EmailField(widget=forms.EmailInput(attrs={**input_attrs, "autocomplete": "email"}))
         password = forms.CharField(widget=forms.PasswordInput(attrs={**input_attrs, "autocomplete": "new-password"}), required=False, help_text="Required when creating an influencer. Leave blank when editing to keep the current password.")
         confirm_password = forms.CharField(widget=forms.PasswordInput(attrs={**input_attrs, "autocomplete": "new-password"}), required=False)
@@ -749,13 +767,14 @@ class InfluencerAdmin(BaseAdmin):
 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            self.fields["commission_rate"].required = False
-            self.fields["commission_fixed_amount"].required = False
+            self.fields["profile_image"].label = "Photo"
             address = self.instance.address if self.instance and isinstance(self.instance.address, dict) else {}
             for form_name, json_name in self.address_fields.items():
                 self.fields[form_name].initial = address.get(json_name, "")
             if self.instance and self.instance.pk:
                 self.fields["username"].initial = self.instance.user.username
+                self.fields["first_name"].initial = self.instance.user.first_name
+                self.fields["last_name"].initial = self.instance.user.last_name
                 self.fields["email"].initial = self.instance.user.email
 
         address_fields = {
@@ -792,15 +811,6 @@ class InfluencerAdmin(BaseAdmin):
                 self.add_error("password", "A password is required for a new influencer.")
             if password != cleaned.get("confirm_password"):
                 self.add_error("confirm_password", "Passwords do not match.")
-            commission_type = cleaned.get("commission_type")
-            if commission_type == m.InfluencerProfile.CommissionType.PERCENTAGE:
-                if not cleaned.get("commission_rate") or cleaned["commission_rate"] <= 0:
-                    self.add_error("commission_rate", "Enter a percentage greater than zero.")
-                cleaned["commission_fixed_amount"] = 0
-            elif commission_type == m.InfluencerProfile.CommissionType.FIXED:
-                if not cleaned.get("commission_fixed_amount") or cleaned["commission_fixed_amount"] <= 0:
-                    self.add_error("commission_fixed_amount", "Enter a fixed amount greater than zero.")
-                cleaned["commission_rate"] = 0
             return cleaned
 
         @transaction.atomic
@@ -809,9 +819,11 @@ class InfluencerAdmin(BaseAdmin):
             if profile.pk:
                 user = profile.user
                 user.username = self.cleaned_data["username"]
-                user.email = self.cleaned_data["email"]
             else:
-                user = get_user_model()(username=self.cleaned_data["username"], email=self.cleaned_data["email"])
+                user = get_user_model()(username=self.cleaned_data["username"])
+            user.first_name = self.cleaned_data["first_name"].strip()
+            user.last_name = self.cleaned_data["last_name"].strip()
+            user.email = self.cleaned_data["email"]
             if self.cleaned_data.get("password"):
                 user.set_password(self.cleaned_data["password"])
             user.save()
@@ -829,30 +841,19 @@ class InfluencerAdmin(BaseAdmin):
             return profile
 
     form = InfluencerForm
-    conditional_fields = {
-        "commission_rate": "commission_type == 'percentage'",
-        "commission_fixed_amount": "commission_type == 'fixed'",
-    }
-    list_display = ("affiliate_id", "user", "commission_method", "referred_orders", "is_active")
-    list_filter = ("commission_type", "is_active", "created_at")
-    search_fields = ("affiliate_id", "user__username", "user__email")
+    list_display = ("affiliate_id", "user", "referred_orders", "is_active")
+    list_filter = ("is_active", "created_at")
+    search_fields = ("affiliate_id", "user__username", "user__first_name", "user__last_name", "user__email")
     readonly_fields = ("affiliate_id", "created_at", "updated_at")
     fieldsets = (
-        ("Account credentials", {"fields": ("username", "email", "password", "confirm_password")}),
-        ("Influencer profile", {"fields": ("affiliate_id", "phone", "profile_image", "commission_type", "commission_rate", "commission_fixed_amount", "is_active")}),
+        ("Account credentials", {"fields": ("username", "first_name", "last_name", "email", "password", "confirm_password")}),
+        ("Influencer profile", {"fields": ("affiliate_id", "phone", "profile_image", "is_active")}),
         ("Address", {"fields": ("address_line_1", "address_line_2", "address_city", "address_state", "address_postal_code", "address_country")}),
         ("Audit", {"fields": ("created_at", "updated_at"), "classes": ("collapse",)}),
     )
 
     @admin.display(description="Orders")
     def referred_orders(self, obj): return obj.orders.count()
-
-    @admin.display(description="Commission")
-    def commission_method(self, obj):
-        if obj.commission_type == m.InfluencerProfile.CommissionType.FIXED:
-            return f"Fixed {obj.commission_fixed_amount:.2f}"
-        percentage = f"{obj.commission_rate:.2f}".rstrip("0").rstrip(".")
-        return f"{percentage}%"
 
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)
@@ -861,15 +862,23 @@ class InfluencerAdmin(BaseAdmin):
 
         recipient = obj.user.email
         username = obj.user.username
+        display_name = obj.user.get_full_name() or username
         initial_password = form.cleaned_data["password"]
         affiliate_id = obj.affiliate_id
         login_url = settings.INFLUENCER_LOGIN_URL
 
         def send_onboarding_email():
+            context = {
+                "display_name": display_name,
+                "login_url": login_url,
+                "username": username,
+                "temporary_password": initial_password,
+                "affiliate_id": affiliate_id,
+            }
             send_mail(
                 "Your FABRIQX influencer account",
                 (
-                    f"Hello {username},\n\n"
+                    f"Hello {display_name},\n\n"
                     "Your FABRIQX influencer account has been created.\n\n"
                     f"Login URL: {login_url}\n"
                     f"Username: {username}\n"
@@ -880,6 +889,7 @@ class InfluencerAdmin(BaseAdmin):
                 ),
                 settings.DEFAULT_FROM_EMAIL,
                 [recipient],
+                html_message=render_to_string("fabriqx/emails/influencer_onboarding.html", context),
             )
 
         transaction.on_commit(send_onboarding_email)
@@ -1197,6 +1207,44 @@ class NewsletterSettingsAdmin(BaseAdmin):
 
     def render_change_form(self, request, context, add=False, change=False, form_url="", obj=None):
         context["show_save_and_add_another"] = False
+        return super().render_change_form(request, context, add, change, form_url, obj)
+
+
+@admin.register(m.SiteSettings)
+class SiteSettingsAdmin(BaseAdmin):
+    class SiteSettingsForm(forms.ModelForm):
+        class Meta:
+            model = m.SiteSettings
+            fields = "__all__"
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.fields["commission_rate"].required = False
+            self.fields["commission_fixed_amount"].required = False
+
+    form = SiteSettingsForm
+    fields = ("commission_type", "commission_rate", "commission_fixed_amount")
+    conditional_fields = {
+        "commission_rate": "commission_type == 'percentage'",
+        "commission_fixed_amount": "commission_type == 'fixed'",
+    }
+
+    def has_add_permission(self, request):
+        return super().has_add_permission(request) and not m.SiteSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def changelist_view(self, request, extra_context=None):
+        settings_object = m.SiteSettings.load()
+        return redirect("admin:fabriqx_sitesettings_change", settings_object.pk)
+
+    def response_change(self, request, obj):
+        return redirect("admin:fabriqx_sitesettings_change", obj.pk)
+
+    def render_change_form(self, request, context, add=False, change=False, form_url="", obj=None):
+        context["show_save_and_add_another"] = False
+        context["show_delete"] = False
         return super().render_change_form(request, context, add, change, form_url, obj)
 
 

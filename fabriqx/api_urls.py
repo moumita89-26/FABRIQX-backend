@@ -19,6 +19,7 @@ urlpatterns = [
     path("auth/token/refresh/", TokenRefreshView.as_view(), name="api-token-refresh"),
     path("auth/forgot-password/", views.ForgotPasswordView.as_view(), name="api-forgot-password"),
     path("auth/reset-password/", views.ResetPasswordView.as_view(), name="api-reset-password"),
+    path("auth/change-password/", views.ChangePasswordView.as_view(), name="api-change-password"),
     path("homepage/", views.HomepageView.as_view(), name="api-homepage"),
     path("navigation/", views.NavigationView.as_view(), name="api-navigation"),
     path("newsletter/", views.NewsletterView.as_view(), name="api-newsletter"),

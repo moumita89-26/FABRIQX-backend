@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Your FABRIQX Admin account</title></head>
+<body style="margin:0;background:#f7f1eb;color:#321e18;font-family:Arial,Helvetica,sans-serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f7f1eb;padding:32px 12px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:620px;background:#fff;border:1px solid #ead9cc;border-radius:16px;overflow:hidden;">
+        <tr><td style="background:#482b20;padding:30px 36px;text-align:center;color:#fff;">
+          <div style="font-size:26px;font-weight:700;letter-spacing:2px;">FABRIQX</div>
+          <div style="margin-top:7px;font-size:13px;color:#e9c8ad;">ADMINISTRATION</div>
+        </td></tr>
+        <tr><td style="padding:36px;">
+          <h1 style="margin:0 0 14px;font-size:25px;line-height:1.3;">Your admin account is ready</h1>
+          <p style="margin:0 0 24px;font-size:16px;line-height:1.65;color:#633e2d;">Hello {{ display_name }}, you have been granted access to the FABRIQX administration panel.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#fff9ed;border:1px solid #fbdc9a;border-radius:12px;">
+            <tr><td style="padding:20px 22px 8px;font-size:12px;font-weight:700;letter-spacing:1px;color:#88451c;">SIGN-IN DETAILS</td></tr>
+            <tr><td style="padding:8px 22px;color:#633e2d;"><strong>Username:</strong> {{ username }}</td></tr>
+            <tr><td style="padding:8px 22px;color:#633e2d;"><strong>Email:</strong> {{ email }}</td></tr>
+            <tr><td style="padding:8px 22px 20px;color:#633e2d;"><strong>Temporary password:</strong> {{ temporary_password }}</td></tr>
+          </table>
+          <div style="padding:28px 0;text-align:center;"><a href="{{ login_url }}" style="display:inline-block;background:#cf7e27;color:#fff;text-decoration:none;font-size:16px;font-weight:700;padding:14px 30px;border-radius:9px;">Open admin panel</a></div>
+          <p style="margin:0;padding:15px 18px;background:#f5ede6;border-radius:9px;font-size:14px;line-height:1.55;color:#633e2d;"><strong>Security reminder:</strong> Sign in and <a href="{{ password_change_url }}" style="color:#aa5d1d;font-weight:700;">change your temporary password</a> immediately. Never share your credentials.</p>
+          <p style="margin:26px 0 0;font-size:15px;line-height:1.6;color:#633e2d;">Welcome to the team.<br><strong>FABRIQX Administration</strong></p>
+        </td></tr>
+        <tr><td style="border-top:1px solid #ead9cc;padding:20px 36px;text-align:center;font-size:12px;color:#9f7358;">This message contains private account credentials. If unexpected, contact your Super Admin.</td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

@@ -99,6 +99,17 @@ class ResetPasswordSerializer(serializers.Serializer):
         return attrs
 
 
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True, min_length=8)
+    confirm_password = serializers.CharField(write_only=True, min_length=8)
+
+    def validate(self, attrs):
+        if attrs["new_password"] != attrs["confirm_password"]:
+            raise serializers.ValidationError({"confirm_password": "Passwords do not match."})
+        return attrs
+
+
 class CategorySerializer(serializers.ModelSerializer):
     children = serializers.SerializerMethodField()
 
@@ -433,25 +444,62 @@ class PageSerializer(serializers.ModelSerializer):
         fields = ("title", "slug", "content", "seo_title", "seo_description", "updated_at")
 
 
+class InfluencerAddressSerializer(serializers.Serializer):
+    line1 = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    line2 = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    city = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    state = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    postal_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    country = serializers.CharField(required=False, allow_blank=True, max_length=100)
+
+
+class VersionedImageField(serializers.ImageField):
+    """Prevent clients from reusing a cached image after it is replaced."""
+
+    def to_representation(self, value):
+        url = super().to_representation(value)
+        if not url:
+            return url
+
+        updated_at = getattr(getattr(value, "instance", None), "updated_at", None)
+        if not updated_at:
+            return url
+
+        separator = "&" if "?" in url else "?"
+        version = int(updated_at.timestamp() * 1_000_000)
+        return f"{url}{separator}v={version}"
+
+
 class InfluencerProfileSerializer(serializers.ModelSerializer):
     user = UserSerializer(read_only=True)
     first_name = serializers.CharField(source="user.first_name", required=False)
     last_name = serializers.CharField(source="user.last_name", required=False)
     email = serializers.EmailField(source="user.email", required=False)
+    photo = VersionedImageField(source="profile_image", required=False, allow_null=True)
+    address = InfluencerAddressSerializer(required=False)
 
     class Meta:
         model = m.InfluencerProfile
-        fields = ("user", "first_name", "last_name", "email", "affiliate_id", "phone", "profile_image", "address", "commission_type", "commission_rate", "commission_fixed_amount")
-        read_only_fields = ("affiliate_id", "commission_type", "commission_rate", "commission_fixed_amount")
+        fields = ("user", "first_name", "last_name", "email", "affiliate_id", "phone", "photo", "address")
+        read_only_fields = ("affiliate_id",)
 
     def update(self, instance, validated_data):
         user_data = validated_data.pop("user", {})
+        address_data = validated_data.pop("address", None)
         if "email" in user_data and get_user_model().objects.filter(email__iexact=user_data["email"]).exclude(pk=instance.user_id).exists():
             raise serializers.ValidationError({"email": "This email is already in use."})
         for field, value in user_data.items():
             setattr(instance.user, field, value)
         if user_data:
             instance.user.save(update_fields=tuple(user_data))
+        if address_data is not None:
+            address = dict(instance.address) if isinstance(instance.address, dict) else {}
+            for field, value in address_data.items():
+                if value:
+                    address[field] = value
+                else:
+                    address.pop(field, None)
+            validated_data["address"] = address
         return super().update(instance, validated_data)
 
 

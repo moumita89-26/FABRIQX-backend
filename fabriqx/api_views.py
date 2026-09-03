@@ -15,6 +15,7 @@ from django.core.mail import send_mail
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.shortcuts import get_object_or_404
+from django.template.loader import render_to_string
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from rest_framework import generics, permissions, status, viewsets
@@ -27,7 +28,7 @@ from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from . import models as m
 from .api_serializers import (
     AddressSerializer, AffiliateValidationSerializer, BrandLogoSectionSerializer, CartItemSerializer, CartSerializer,
-    CategorySerializer, CheckoutSerializer, CouponApplySerializer, CustomerProfileSerializer,
+    CategorySerializer, ChangePasswordSerializer, CheckoutSerializer, CouponApplySerializer, CustomerProfileSerializer,
     EmptySerializer, FooterSocialSectionSerializer, ForgotPasswordSerializer, GiftSectionSerializer, HomepageResponseSerializer, InfluencerCommissionSerializer, InfluencerDashboardSerializer, InfluencerOrderSerializer, InfluencerProfileSerializer, InfluencerSalesSerializer, LoginSerializer, LogoutSerializer, MarketplaceWebhookSerializer, NewsletterSerializer, OfferBannerSerializer, OfferGridSectionSerializer, OrderReasonSerializer, OrderSerializer,
     PageSerializer, PaymentConfirmationSerializer, ProductDetailSerializer, ProductListSerializer, RefundRequestSerializer, SalesReportPointSerializer,
     ProductQuestionSerializer, RegistrationSerializer, ResetPasswordSerializer, ReviewCreateSerializer,
@@ -50,6 +51,16 @@ class IsInfluencer(permissions.BasePermission):
             request.user.is_authenticated
             and hasattr(request.user, "influencer_profile")
             and request.user.influencer_profile.is_active
+        )
+
+
+class IsCustomerOrInfluencer(permissions.BasePermission):
+    message = "A customer or influencer account is required."
+
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and (
+            hasattr(request.user, "customer_profile")
+            or hasattr(request.user, "influencer_profile")
         )
 
 
@@ -84,11 +95,12 @@ def finalize_paid_order(order, payment, transaction_id, provider_response):
     m.Invoice.objects.get_or_create(order=order, defaults={"billing_details": order.billing_address})
     if order.influencer_id:
         influencer = order.influencer
+        commission_settings = m.SiteSettings.load()
         eligible = max(order.subtotal - order.discount_total, Decimal("0"))
-        if influencer.commission_type == m.InfluencerProfile.CommissionType.FIXED:
-            rate, amount = Decimal("0"), influencer.commission_fixed_amount
+        if commission_settings.commission_type == m.SiteSettings.CommissionType.FIXED:
+            rate, amount = Decimal("0"), commission_settings.commission_fixed_amount
         else:
-            rate = influencer.commission_rate
+            rate = commission_settings.commission_rate
             amount = (eligible * rate / Decimal("100")).quantize(Decimal("0.01"))
         commission, _ = m.InfluencerCommission.objects.get_or_create(order=order, defaults={
             "influencer": influencer, "eligible_amount": eligible, "rate": rate, "commission_amount": amount,
@@ -155,11 +167,22 @@ class ForgotPasswordView(APIView):
             token = default_token_generator.make_token(user)
             separator = "&" if "?" in settings.FRONTEND_RESET_PASSWORD_URL else "?"
             reset_url = f"{settings.FRONTEND_RESET_PASSWORD_URL}{separator}{urlencode({'uid': uid, 'token': token})}"
+            display_name = user.get_full_name() or user.get_username()
             send_mail(
                 "Reset your FABRIQX password",
-                f"Use this secure link to reset your password:\n\n{reset_url}\n\nIf you did not request this, ignore this email.",
+                (
+                    f"Hello {display_name},\n\n"
+                    "We received a request to reset your FABRIQX password.\n\n"
+                    f"Use this secure link to choose a new password:\n{reset_url}\n\n"
+                    "If you did not request this, you can safely ignore this email.\n\n"
+                    "FABRIQX Team"
+                ),
                 settings.DEFAULT_FROM_EMAIL,
                 [user.email],
+                html_message=render_to_string(
+                    "fabriqx/emails/password_reset.html",
+                    {"display_name": display_name, "reset_url": reset_url},
+                ),
             )
         return Response({"detail": "If a matching account exists, a password reset link has been sent."})
 
@@ -190,6 +213,28 @@ class ResetPasswordView(APIView):
         user.set_password(serializer.validated_data["new_password"])
         user.save(update_fields=("password",))
         return Response({"detail": "Password reset successfully. You can now log in with the new password."})
+
+
+@extend_schema(tags=["Authentication"], request=ChangePasswordSerializer)
+class ChangePasswordView(APIView):
+    permission_classes = (IsCustomerOrInfluencer,)
+    serializer_class = ChangePasswordSerializer
+
+    def post(self, request):
+        serializer = self.serializer_class(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        if not request.user.check_password(serializer.validated_data["current_password"]):
+            return Response(
+                {"current_password": ["The current password is incorrect."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            validate_password(serializer.validated_data["new_password"], user=request.user)
+        except DjangoValidationError as exc:
+            return Response({"new_password": list(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
+        request.user.set_password(serializer.validated_data["new_password"])
+        request.user.save(update_fields=("password",))
+        return Response({"detail": "Password changed successfully. Please log in again."})
 
 
 @extend_schema(tags=["Storefront"])
@@ -640,6 +685,7 @@ class InfluencerSalesView(APIView):
 
     def get(self, request):
         influencer = request.user.influencer_profile
+        commission_settings = m.SiteSettings.load()
         period = request.query_params.get("period", "month")
         truncation = {"day": TruncDay, "week": TruncWeek, "month": TruncMonth}.get(period)
         if truncation is None:
@@ -662,9 +708,9 @@ class InfluencerSalesView(APIView):
             "successful_orders": summary["total_orders"] or 0,
             "total_sales": summary["total_sales"] or Decimal("0"),
             "recent_sales": orders.filter(placed_at__gte=recent_cutoff).aggregate(value=Sum("grand_total"))["value"] or Decimal("0"),
-            "commission_type": influencer.commission_type,
-            "commission_rate": influencer.commission_rate,
-            "commission_fixed_amount": influencer.commission_fixed_amount,
+            "commission_type": commission_settings.commission_type,
+            "commission_rate": commission_settings.commission_rate,
+            "commission_fixed_amount": commission_settings.commission_fixed_amount,
             "total_commission": commissions["total_commission"] or Decimal("0"),
             "pending_commission": commissions["pending_commission"] or Decimal("0"),
             "approved_commission": commissions["approved_commission"] or Decimal("0"),
