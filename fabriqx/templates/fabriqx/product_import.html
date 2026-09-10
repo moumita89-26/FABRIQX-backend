@@ -8,8 +8,6 @@
 <div class="max-w-3xl">
     <div class="bg-white border border-base-200 p-6 rounded-default shadow-xs dark:bg-base-900 dark:border-base-700">
         <p class="mb-2 text-subtle">Upload CSV or XLSX. Rows are streamed and processed in batches of 500. Repeating a product slug adds or updates its variants.</p>
-        <p class="mb-2 text-subtle">For third-party images, put the complete public HTTP/HTTPS link in <strong>image_url</strong>. The importer downloads and validates the image, then saves it into local media storage.</p>
-        <p class="mb-5 text-subtle"><strong>image_path</strong> is only for an image that already exists under this server's MEDIA_ROOT. Leave it blank when using <strong>image_url</strong>.</p>
         <form method="post" enctype="multipart/form-data">
             {% csrf_token %}
             <label class="block font-semibold mb-2" for="id_import_file">Product file</label>

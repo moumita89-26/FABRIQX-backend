@@ -1,0 +1,8 @@
+{% load i18n %}
+<div class="bg-white border border-base-200 flex flex-col items-center px-8 py-24 rounded-default dark:bg-base-900 dark:border-base-800">
+    <span class="material-symbols-outlined text-base-400" style="font-size:48px" aria-hidden="true">inbox</span>
+    <h2 class="font-semibold mt-4 text-xl">{% translate "No results found" %}</h2>
+    {% if cl.full_result_count %}
+        <a href="?" class="mt-4" title="Clear search and filters">{% translate "Reset filters" %}</a>
+    {% endif %}
+</div>

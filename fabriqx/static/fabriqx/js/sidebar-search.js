@@ -1,0 +1,36 @@
+(() => {
+    const input = document.getElementById('sidebar-search');
+    const navigation = document.getElementById('nav-sidebar-apps');
+    const empty = document.getElementById('sidebar-search-empty');
+    if (!input || !navigation) return;
+    const normalize = (text) => text.trim().toLocaleLowerCase();
+    const groups = Array.from(navigation.children).map(group => ({
+        element: group,
+        title: normalize(group.querySelector('h2')?.textContent || ''),
+        items: Array.from(group.querySelectorAll('li > a')).map(link => ({
+            element: link.parentElement,
+            text: normalize(link.textContent),
+        })),
+    }));
+    function filter() {
+        const words = normalize(input.value).split(/\s+/).filter(Boolean);
+        let matches = 0;
+        for (const group of groups) {
+            let visible = 0;
+            for (const item of group.items) {
+                const show = words.every(word => `${group.title} ${item.text}`.includes(word));
+                if (show) { item.element.style.removeProperty('display'); visible++; }
+                else item.element.style.setProperty('display', 'none', 'important');
+            }
+            if (visible || !words.length) group.element.style.removeProperty('display');
+            else group.element.style.setProperty('display', 'none', 'important');
+            matches += visible;
+        }
+        empty.hidden = !words.length || matches > 0;
+    }
+    input.addEventListener('input', filter);
+    input.addEventListener('keydown', event => {
+        if (event.key === 'Escape') { input.value = ''; filter(); }
+        if (event.key === 'Enter') event.preventDefault();
+    });
+})();

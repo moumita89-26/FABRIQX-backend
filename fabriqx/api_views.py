@@ -29,7 +29,7 @@ from . import models as m
 from .api_serializers import (
     AddressSerializer, AffiliateValidationSerializer, BrandLogoSectionSerializer, CartItemSerializer, CartSerializer,
     CategorySerializer, ChangePasswordSerializer, CheckoutSerializer, CouponApplySerializer, CustomerProfileSerializer,
-    EmptySerializer, FooterSocialSectionSerializer, ForgotPasswordSerializer, GiftSectionSerializer, HomepageResponseSerializer, InfluencerCommissionSerializer, InfluencerDashboardSerializer, InfluencerOrderSerializer, InfluencerProfileSerializer, InfluencerSalesSerializer, LoginSerializer, LogoutSerializer, MarketplaceWebhookSerializer, NewsletterSerializer, OfferBannerSerializer, OfferGridSectionSerializer, OrderReasonSerializer, OrderSerializer,
+    EmptySerializer, FooterSocialSectionSerializer, ForgotPasswordSerializer, GiftSectionSerializer, HomepageResponseSerializer, InfluencerCommissionSerializer, InfluencerDashboardSerializer, InfluencerOrderSerializer, InfluencerProfileSerializer, InfluencerSalesSerializer, LoginSerializer, LogoutSerializer, MarketplaceWebhookSerializer, NewsletterSerializer, NewsletterSettingsSerializer, OfferBannerSerializer, OfferGridSectionSerializer, OrderReasonSerializer, OrderSerializer,
     PageSerializer, PaymentConfirmationSerializer, ProductDetailSerializer, ProductListSerializer, RefundRequestSerializer, SalesReportPointSerializer,
     ProductQuestionSerializer, RegistrationSerializer, ResetPasswordSerializer, ReviewCreateSerializer,
     ReviewSerializer, UserSerializer, WishlistSerializer,
@@ -165,8 +165,9 @@ class ForgotPasswordView(APIView):
         if user and (hasattr(user, "customer_profile") or hasattr(user, "influencer_profile")):
             uid = urlsafe_base64_encode(force_bytes(user.pk))
             token = default_token_generator.make_token(user)
+            account = "influencer" if hasattr(user, "influencer_profile") else "customer"
             separator = "&" if "?" in settings.FRONTEND_RESET_PASSWORD_URL else "?"
-            reset_url = f"{settings.FRONTEND_RESET_PASSWORD_URL}{separator}{urlencode({'uid': uid, 'token': token})}"
+            reset_url = f"{settings.FRONTEND_RESET_PASSWORD_URL}{separator}{urlencode({'uid': uid, 'token': token, 'account': account})}"
             display_name = user.get_full_name() or user.get_username()
             send_mail(
                 "Reset your FABRIQX password",
@@ -204,7 +205,13 @@ class ResetPasswordView(APIView):
         except (ValueError, TypeError, OverflowError, get_user_model().DoesNotExist):
             user = None
         has_supported_profile = user and (hasattr(user, "customer_profile") or hasattr(user, "influencer_profile"))
-        if not has_supported_profile or not default_token_generator.check_token(user, serializer.validated_data["token"]):
+        account = serializer.validated_data.get("account")
+        account_matches = (
+            not account
+            or (account == "customer" and user and hasattr(user, "customer_profile"))
+            or (account == "influencer" and user and hasattr(user, "influencer_profile"))
+        )
+        if not has_supported_profile or not account_matches or not default_token_generator.check_token(user, serializer.validated_data["token"]):
             return Response({"detail": "The reset link is invalid or has expired."}, status=status.HTTP_400_BAD_REQUEST)
         try:
             validate_password(serializer.validated_data["new_password"], user=user)
@@ -251,6 +258,7 @@ class HomepageView(APIView):
         offer_banners = m.OfferBanner.objects.filter(is_active=True).filter(Q(starts_at__isnull=True) | Q(starts_at__lte=now)).filter(Q(ends_at__isnull=True) | Q(ends_at__gte=now))
         offer_grid = m.OfferGridSection.objects.filter(is_active=True).prefetch_related("items").first()
         footer_social = m.FooterSocialSection.objects.filter(is_active=True).prefetch_related("links").first()
+        newsletter_settings = m.NewsletterSettings.objects.first()
         return Response({
             "banners": [{"id": x.id, "title": x.title, "subtitle": x.subtitle, "image": request.build_absolute_uri(x.image.url) if x.image else None, "link": x.link} for x in banners],
             "gift_sections": GiftSectionSerializer(gift_sections, many=True, context={"request": request}).data,
@@ -258,6 +266,7 @@ class HomepageView(APIView):
             "offer_banners": OfferBannerSerializer(offer_banners, many=True, context={"request": request}).data,
             "offer_grid": OfferGridSectionSerializer(offer_grid, context={"request": request}).data if offer_grid else None,
             "footer_social": FooterSocialSectionSerializer(footer_social, context={"request": request}).data if footer_social else None,
+            "newsletter_settings": NewsletterSettingsSerializer(newsletter_settings).data if newsletter_settings else None,
             "categories": CategorySerializer(m.Category.objects.filter(is_active=True, parent__isnull=True), many=True, context={"request": request}).data,
             "trending_products": ProductListSerializer(products.filter(is_trending=True)[:12], many=True, context={"request": request}).data,
             "new_arrivals": ProductListSerializer(products.filter(is_new_arrival=True)[:12], many=True, context={"request": request}).data,
@@ -265,7 +274,16 @@ class HomepageView(APIView):
             "sections": list(m.HomepageSection.objects.filter(is_active=True).values(
                 "id", "title", "section_type", "content", "editor_content", "display_order"
             )),
-            "testimonials": list(m.Testimonial.objects.filter(is_active=True).values("id", "customer_name", "quote", "rating", "image")),
+            "testimonials": list(
+                m.Testimonial.objects.filter(is_active=True).values(
+                    "id",
+                    "customer_name",
+                    "image",
+                    "sub_text",
+                    "content",
+                    "rating",
+                )
+            ),
         })
 
 
@@ -576,25 +594,7 @@ class NewsletterView(generics.CreateAPIView):
     serializer_class = NewsletterSerializer
 
     def perform_create(self, serializer):
-        subscription = serializer.save()
-        newsletter_settings = m.NewsletterSettings.objects.filter(notifications_enabled=True).first()
-        if not newsletter_settings:
-            return
-
-        def notify_admin():
-            send_mail(
-                "New FABRIQX newsletter subscription",
-                (
-                    "A customer subscribed to the FABRIQX newsletter.\n\n"
-                    f"Email: {subscription.email}\n"
-                    f"Source: {subscription.source or 'Not provided'}\n"
-                    f"Subscribed at: {subscription.created_at:%Y-%m-%d %H:%M:%S %Z}\n"
-                ),
-                settings.DEFAULT_FROM_EMAIL,
-                [newsletter_settings.notification_email],
-            )
-
-        transaction.on_commit(notify_admin)
+        serializer.save()
 
 
 @extend_schema(tags=["Storefront"])

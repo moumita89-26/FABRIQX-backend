@@ -9,6 +9,7 @@ from urllib.parse import urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.utils.text import slugify
@@ -118,6 +119,31 @@ def _integer(value, default=0):
     return int(value)
 
 
+def _format_error(exc):
+    if isinstance(exc, ValidationError):
+        if hasattr(exc, "message_dict"):
+            messages = []
+            for field, field_errors in exc.message_dict.items():
+                label = "Product" if field == "__all__" else field.replace("_", " ").capitalize()
+                messages.append(f"{label}: {'; '.join(field_errors)}")
+            return " ".join(messages)
+        return "; ".join(exc.messages)
+    return str(exc)
+
+
+def _row_list(row_numbers):
+    ranges = []
+    start = previous = row_numbers[0]
+    for number in row_numbers[1:]:
+        if number == previous + 1:
+            previous = number
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = number
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ", ".join(ranges)
+
+
 def _process_row(raw):
     row = {str(key).strip(): value for key, value in raw.items() if key}
     required = ("category", "product_name", "regular_price", "sku")
@@ -201,7 +227,7 @@ def _process_row(raw):
 
 def import_products(upload, batch_size=500):
     counts = {"rows": 0, "products": 0, "variants": 0, "images": 0, "failed": 0}
-    errors = []
+    error_rows = {}
     batch = []
 
     def process_batch(rows):
@@ -214,8 +240,11 @@ def import_products(upload, batch_size=500):
                 counts["images"] += int(image_created)
             except Exception as exc:
                 counts["failed"] += 1
-                if len(errors) < 50:
-                    errors.append(f"Row {row_number}: {exc}")
+                error = _format_error(exc)
+                if error in error_rows:
+                    error_rows[error].append(row_number)
+                elif len(error_rows) < 50:
+                    error_rows[error] = [row_number]
 
     for row_number, row in enumerate(_rows(upload), start=2):
         counts["rows"] += 1
@@ -224,4 +253,8 @@ def import_products(upload, batch_size=500):
             process_batch(batch)
             batch.clear()
     process_batch(batch)
+    errors = [
+        f"{'Row' if len(rows) == 1 else 'Rows'} {_row_list(rows)}: {error}"
+        for error, rows in error_rows.items()
+    ]
     return counts, errors

@@ -1,0 +1,18 @@
+<div class="gift-live-preview" id="gift-live-preview" aria-label="Gift section preview">
+    <div class="gift-preview-images">
+        <img data-gift-image="main_image" {% if gift.main_image %}src="{{ gift.main_image.url }}"{% else %}hidden{% endif %} alt="Main gift section image">
+        <img data-gift-image="gift_image" {% if gift.gift_image %}src="{{ gift.gift_image.url }}"{% else %}hidden{% endif %} alt="Gift">
+    </div>
+    <div class="gift-preview-content">
+        <div class="gift-preview-badge"><img data-gift-image="badge_icon" hidden alt=""><span data-gift-text="badge_eyebrow"></span> <strong data-gift-text="badge_title"></strong></div>
+        <img data-gift-image="logo" hidden alt="Brand logo">
+        <h2><span data-gift-text="accent_heading"></span> <span data-gift-text="heading"></span></h2>
+        <p data-gift-text="description"></p>
+        <div class="gift-preview-features" data-gift-features></div>
+        <h3 data-gift-text="thank_you_title"></h3>
+        <p data-gift-text="thank_you_text"></p>
+        <div class="gift-preview-statistics" data-gift-statistics></div>
+        <span class="gift-preview-cta" data-gift-text="cta_label"></span>
+        <small data-gift-text="cta_url"></small>
+    </div>
+</div>

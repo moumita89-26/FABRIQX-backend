@@ -90,6 +90,7 @@ class ForgotPasswordSerializer(serializers.Serializer):
 class ResetPasswordSerializer(serializers.Serializer):
     uid = serializers.CharField()
     token = serializers.CharField()
+    account = serializers.ChoiceField(choices=("customer", "influencer"), required=False)
     new_password = serializers.CharField(write_only=True, min_length=8)
     confirm_password = serializers.CharField(write_only=True, min_length=8)
 
@@ -483,11 +484,23 @@ class InfluencerProfileSerializer(serializers.ModelSerializer):
         fields = ("user", "first_name", "last_name", "email", "affiliate_id", "phone", "photo", "address")
         read_only_fields = ("affiliate_id",)
 
+    def validate_email(self, value):
+        user = self.instance.user if self.instance is not None else None
+        # Legacy accounts may share an email. Keeping that address must not
+        # prevent edits to unrelated profile fields.
+        if user is not None and value.casefold() == user.email.strip().casefold():
+            return value
+        matches = get_user_model().objects.filter(email__iexact=value)
+        if user is not None:
+            matches = matches.exclude(pk=user.pk)
+        if matches.exists():
+            raise serializers.ValidationError("This email is already in use.")
+        return value
+
+    @transaction.atomic
     def update(self, instance, validated_data):
         user_data = validated_data.pop("user", {})
         address_data = validated_data.pop("address", None)
-        if "email" in user_data and get_user_model().objects.filter(email__iexact=user_data["email"]).exclude(pk=instance.user_id).exists():
-            raise serializers.ValidationError({"email": "This email is already in use."})
         for field, value in user_data.items():
             setattr(instance.user, field, value)
         if user_data:
@@ -602,7 +615,13 @@ class FooterSocialSectionSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(FooterSocialLinkSerializer(many=True))
     def get_links(self, obj):
-        return FooterSocialLinkSerializer(obj.links.filter(is_active=True)[:4], many=True, context=self.context).data
+        return FooterSocialLinkSerializer(obj.links.filter(is_active=True), many=True, context=self.context).data
+
+
+class NewsletterSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = m.NewsletterSettings
+        fields = ("id", "title", "description")
 
 
 class HomepageResponseSerializer(serializers.Serializer):
@@ -612,6 +631,7 @@ class HomepageResponseSerializer(serializers.Serializer):
     offer_banners = OfferBannerSerializer(many=True)
     offer_grid = OfferGridSectionSerializer(allow_null=True)
     footer_social = FooterSocialSectionSerializer(allow_null=True)
+    newsletter_settings = NewsletterSettingsSerializer(allow_null=True)
     categories = CategorySerializer(many=True)
     trending_products = ProductListSerializer(many=True)
     new_arrivals = ProductListSerializer(many=True)

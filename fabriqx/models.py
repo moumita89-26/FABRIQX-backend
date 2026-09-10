@@ -1,13 +1,51 @@
 import uuid
 from decimal import Decimal
+import re
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.core.validators import MaxValueValidator, MinValueValidator
+from django.core.validators import FileExtensionValidator, MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import Sum
 from django.utils import timezone
 from django.utils.text import slugify
+
+
+BANNER_LOGO_IMAGE_HELP_TEXT = "Allowed formats: JPG, JPEG, PNG, GIF. Maximum file size: 5 MB."
+
+
+def validate_banner_logo_image(image):
+    if not image or getattr(image, "_committed", False):
+        return
+    FileExtensionValidator(allowed_extensions=["jpg", "jpeg", "png", "gif"])(image)
+    from PIL import Image, UnidentifiedImageError
+    position = image.tell()
+    try:
+        image.seek(0)
+        detected = Image.open(image)
+        if detected.format not in {"JPEG", "PNG", "GIF"}:
+            raise ValidationError("Only JPG, JPEG, PNG, and GIF images are allowed.")
+        detected.verify()
+    except (UnidentifiedImageError, OSError, SyntaxError) as error:
+        raise ValidationError("Upload a valid JPG, JPEG, PNG, or GIF image.") from error
+    finally:
+        image.seek(position)
+
+
+MAX_IMAGE_FILE_SIZE = 5 * 1024 * 1024
+IMAGE_FILE_SIZE_HELP_TEXT = "Maximum file size: 5 MB."
+
+
+def validate_image_file_size(image):
+    # Existing FieldFile values were already checked when uploaded; avoid
+    # reopening storage merely to validate unrelated edits.
+    if image and not getattr(image, "_committed", False) and image.size > MAX_IMAGE_FILE_SIZE:
+        raise ValidationError("Image file size must not exceed 5 MB.")
+
+
+def validate_customer_name(value):
+    if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", value.strip()):
+        raise ValidationError("Customer name cannot contain only a numeric value.")
 
 
 def reference(prefix):
@@ -34,7 +72,7 @@ class Category(TimeStampedModel):
     slug = models.SlugField(max_length=140, unique=True, blank=True)
     audience = models.CharField(max_length=20, choices=Audience.choices, default=Audience.WOMEN)
     description = models.TextField(blank=True)
-    image = models.ImageField(upload_to="categories/", blank=True)
+    image = models.ImageField(upload_to="categories/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
     display_order = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
     seo_title = models.CharField(max_length=70, blank=True)
@@ -49,7 +87,7 @@ class Category(TimeStampedModel):
         return f"{self.parent} / {self.name}" if self.parent else self.name
 
     def save(self, *args, **kwargs):
-        self.slug = self.slug or slugify(self.name)
+        self.slug = slugify(self.name)
         super().save(*args, **kwargs)
 
 
@@ -64,7 +102,7 @@ class Product(TimeStampedModel):
     slug = models.SlugField(max_length=220, unique=True, blank=True)
     brand = models.CharField(max_length=120, blank=True)
     short_description = models.CharField(max_length=300, blank=True)
-    description = models.TextField()
+    description = models.TextField(blank=True)
     regular_price = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal("0"))])
     sale_price = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True, validators=[MinValueValidator(Decimal("0"))])
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
@@ -99,7 +137,7 @@ class Product(TimeStampedModel):
 
 class ProductImage(TimeStampedModel):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="images")
-    image = models.ImageField(upload_to="products/%Y/%m/")
+    image = models.ImageField(upload_to="products/%Y/%m/", validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
     alt_text = models.CharField(max_length=200, blank=True)
     display_order = models.PositiveIntegerField(default=0)
     is_primary = models.BooleanField(default=False)
@@ -165,6 +203,8 @@ class InventoryMovement(TimeStampedModel):
         return f"{self.variant.sku}: {self.quantity:+d}"
 
     def clean(self):
+        if self.stock_before is None or self.quantity is None or self.stock_after is None:
+            return
         if self.stock_before + self.quantity != self.stock_after:
             raise ValidationError("Stock after must equal stock before plus quantity.")
 
@@ -301,10 +341,23 @@ class Coupon(TimeStampedModel):
         return self.code
 
     def clean(self):
-        if self.expires_at <= self.starts_at:
-            raise ValidationError({"expires_at": "Expiry must be after the start time."})
-        if self.discount_type == self.DiscountType.PERCENTAGE and self.discount_value > 100:
-            raise ValidationError({"discount_value": "Percentage cannot exceed 100."})
+        errors = {}
+        if (
+            self._state.adding
+            and self.starts_at is not None
+            and timezone.localdate(self.starts_at) < timezone.localdate()
+        ):
+            errors["starts_at"] = "Start date cannot be earlier than today."
+        if self.starts_at is not None and self.expires_at is not None and self.expires_at <= self.starts_at:
+            errors["expires_at"] = "Expiry must be after the start time."
+        if (
+            self.discount_type == self.DiscountType.PERCENTAGE
+            and self.discount_value is not None
+            and self.discount_value > 100
+        ):
+            errors["discount_value"] = "Percentage cannot exceed 100."
+        if errors:
+            raise ValidationError(errors)
 
     def save(self, *args, **kwargs):
         self.code = self.code.strip().upper()
@@ -315,7 +368,7 @@ class InfluencerProfile(TimeStampedModel):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="influencer_profile")
     affiliate_id = models.CharField(max_length=40, unique=True, blank=True)
     phone = models.CharField(max_length=30, blank=True)
-    profile_image = models.ImageField(upload_to="influencers/profiles/", blank=True)
+    profile_image = models.ImageField(upload_to="influencers/profiles/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
     address = models.JSONField(default=dict, blank=True)
     is_active = models.BooleanField(default=True)
 
@@ -598,7 +651,7 @@ class ProductQuestion(TimeStampedModel):
 class Banner(TimeStampedModel):
     title = models.CharField(max_length=150)
     subtitle = models.CharField(max_length=250, blank=True)
-    image = models.ImageField(upload_to="banners/")
+    image = models.ImageField(upload_to="banners/", validators=[validate_image_file_size, validate_banner_logo_image], help_text=BANNER_LOGO_IMAGE_HELP_TEXT)
     link = models.CharField(max_length=300, blank=True)
     display_order = models.PositiveIntegerField(default=0)
     starts_at = models.DateTimeField(blank=True, null=True)
@@ -610,6 +663,26 @@ class Banner(TimeStampedModel):
 
     def __str__(self):
         return self.title
+
+    def clean_fields(self, exclude=None):
+        super().clean_fields(exclude=exclude)
+        excluded = set(exclude or ())
+        errors = {}
+        if (
+            "starts_at" not in excluded
+            and self._state.adding
+            and self.starts_at
+            and timezone.localdate(self.starts_at) < timezone.localdate()
+        ):
+            errors["starts_at"] = "Start date cannot be earlier than today."
+        if (
+            not {"starts_at", "ends_at"} & excluded
+            and self.starts_at and self.ends_at
+            and self.ends_at < self.starts_at
+        ):
+            errors["ends_at"] = "End date cannot be earlier than the start date."
+        if errors:
+            raise ValidationError(errors)
 
 
 class HomepageSection(TimeStampedModel):
@@ -646,14 +719,14 @@ class GiftSection(TimeStampedModel):
     internal_name = models.CharField(max_length=150, help_text="Only used to identify this campaign in admin.")
     badge_eyebrow = models.CharField(max_length=100, blank=True, default="With every order")
     badge_title = models.CharField(max_length=100, blank=True, default="Free gift")
-    badge_icon = models.ImageField(upload_to="gift-sections/badges/", blank=True)
-    logo = models.ImageField(upload_to="gift-sections/logos/", blank=True)
+    badge_icon = models.ImageField(upload_to="gift-sections/badges/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
+    logo = models.ImageField(upload_to="gift-sections/logos/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
     accent_heading = models.CharField(max_length=150, blank=True, default="Shop More,")
     heading = models.CharField(max_length=200, default="Get More Joy!")
     description = models.TextField(blank=True, default="Every purchase comes with a free gift, just for you!")
-    main_image = models.ImageField(upload_to="gift-sections/main/")
-    gift_image = models.ImageField(upload_to="gift-sections/gifts/", blank=True)
-    background_image = models.ImageField(upload_to="gift-sections/backgrounds/", blank=True)
+    main_image = models.ImageField(upload_to="gift-sections/main/", validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
+    gift_image = models.ImageField(upload_to="gift-sections/gifts/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
+    background_image = models.ImageField(upload_to="gift-sections/backgrounds/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
     thank_you_title = models.CharField(max_length=200, blank=True, default="Thank you for choosing Fabriqx.")
     thank_you_text = models.TextField(blank=True, default="Your love inspires us to keep creating styles that make every moment special.")
     cta_label = models.CharField(max_length=150, blank=True, default="Shop now & get your free gift")
@@ -670,13 +743,22 @@ class GiftSection(TimeStampedModel):
         return self.internal_name
 
     def clean(self):
+        errors = {}
+        if (
+            self._state.adding
+            and self.starts_at
+            and timezone.localdate(self.starts_at) < timezone.localdate()
+        ):
+            errors["starts_at"] = "Start date cannot be earlier than today."
         if self.starts_at and self.ends_at and self.ends_at <= self.starts_at:
-            raise ValidationError({"ends_at": "End time must be after the start time."})
+            errors["ends_at"] = "End time must be after the start time."
+        if errors:
+            raise ValidationError(errors)
 
 
 class GiftSectionFeature(TimeStampedModel):
     section = models.ForeignKey(GiftSection, on_delete=models.CASCADE, related_name="features")
-    icon = models.ImageField(upload_to="gift-sections/features/", blank=True)
+    icon = models.ImageField(upload_to="gift-sections/features/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
     text = models.CharField(max_length=150)
     display_order = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
@@ -690,7 +772,7 @@ class GiftSectionFeature(TimeStampedModel):
 
 class GiftSectionStatistic(TimeStampedModel):
     section = models.ForeignKey(GiftSection, on_delete=models.CASCADE, related_name="statistics")
-    icon = models.ImageField(upload_to="gift-sections/statistics/", blank=True)
+    icon = models.ImageField(upload_to="gift-sections/statistics/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
     eyebrow = models.CharField(max_length=100, blank=True)
     value = models.CharField(max_length=50)
     label = models.CharField(max_length=100)
@@ -717,7 +799,7 @@ class BrandLogoSection(TimeStampedModel):
 class BrandLogo(TimeStampedModel):
     section = models.ForeignKey(BrandLogoSection, on_delete=models.CASCADE, related_name="logos")
     brand_name = models.CharField(max_length=120)
-    logo = models.ImageField(upload_to="brand-logos/")
+    logo = models.ImageField(upload_to="brand-logos/", validators=[validate_image_file_size, validate_banner_logo_image], help_text=BANNER_LOGO_IMAGE_HELP_TEXT)
     alt_text = models.CharField(max_length=180, blank=True)
     url = models.CharField(max_length=300, blank=True)
     open_in_new_tab = models.BooleanField(default=False)
@@ -737,8 +819,8 @@ class BrandLogo(TimeStampedModel):
 
 class OfferBanner(TimeStampedModel):
     internal_name = models.CharField(max_length=150, help_text="Only used to identify this banner in admin.")
-    desktop_image = models.ImageField(upload_to="offers/banners/desktop/")
-    mobile_image = models.ImageField(upload_to="offers/banners/mobile/", blank=True)
+    desktop_image = models.ImageField(upload_to="offers/banners/desktop/", validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
+    mobile_image = models.ImageField(upload_to="offers/banners/mobile/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
     alt_text = models.CharField(max_length=180, blank=True)
     shop_now_url = models.CharField("Shop now URL", max_length=300)
     open_in_new_tab = models.BooleanField(default=False)
@@ -754,8 +836,17 @@ class OfferBanner(TimeStampedModel):
         return self.internal_name
 
     def clean(self):
+        errors = {}
+        if (
+            self._state.adding
+            and self.starts_at
+            and timezone.localdate(self.starts_at) < timezone.localdate()
+        ):
+            errors["starts_at"] = "Start date cannot be earlier than today."
         if self.starts_at and self.ends_at and self.ends_at <= self.starts_at:
-            raise ValidationError({"ends_at": "End time must be after the start time."})
+            errors["ends_at"] = "End time must be after the start time."
+        if errors:
+            raise ValidationError(errors)
 
     def save(self, *args, **kwargs):
         self.alt_text = self.alt_text or self.internal_name
@@ -773,8 +864,8 @@ class OfferGridSection(TimeStampedModel):
 class OfferGridItem(TimeStampedModel):
     section = models.ForeignKey(OfferGridSection, on_delete=models.CASCADE, related_name="items")
     internal_name = models.CharField(max_length=150)
-    desktop_image = models.ImageField(upload_to="offers/grid/desktop/")
-    mobile_image = models.ImageField(upload_to="offers/grid/mobile/", blank=True)
+    desktop_image = models.ImageField(upload_to="offers/grid/desktop/", validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
+    mobile_image = models.ImageField(upload_to="offers/grid/mobile/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
     alt_text = models.CharField(max_length=180, blank=True)
     shop_now_url = models.CharField("Shop now URL", max_length=300)
     open_in_new_tab = models.BooleanField(default=False)
@@ -804,7 +895,7 @@ class FooterSocialSection(TimeStampedModel):
 class FooterSocialLink(TimeStampedModel):
     section = models.ForeignKey(FooterSocialSection, on_delete=models.CASCADE, related_name="links")
     platform_name = models.CharField(max_length=80)
-    icon = models.ImageField(upload_to="footer/social-icons/")
+    icon = models.ImageField(upload_to="footer/social-icons/", validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
     url = models.URLField(max_length=300)
     aria_label = models.CharField("Accessibility label", max_length=120, blank=True)
     display_order = models.PositiveIntegerField(default=0)
@@ -822,11 +913,33 @@ class FooterSocialLink(TimeStampedModel):
 
 
 class Testimonial(TimeStampedModel):
-    customer_name = models.CharField(max_length=150)
-    quote = models.TextField()
-    rating = models.PositiveSmallIntegerField(default=5, validators=[MinValueValidator(1), MaxValueValidator(5)])
-    image = models.ImageField(upload_to="testimonials/", blank=True)
+    customer_name = models.CharField(
+        max_length=150,
+        validators=[validate_customer_name],
+    )
+    image = models.ImageField(
+        upload_to="testimonials/",
+        blank=True,
+        validators=[validate_image_file_size],
+        help_text=IMAGE_FILE_SIZE_HELP_TEXT,
+    )
+    sub_text = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="Optional short text shown below the customer name.",
+    )
+    content = models.TextField()
+    rating = models.SmallIntegerField(
+        default=5,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(5),
+        ],
+    )
     is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ("-created_at",)
 
     def __str__(self):
         return self.customer_name
@@ -842,14 +955,14 @@ class NewsletterSubscription(TimeStampedModel):
 
 
 class NewsletterSettings(TimeStampedModel):
-    notification_email = models.EmailField(help_text="New newsletter subscription notifications will be sent to this address.")
-    notifications_enabled = models.BooleanField(default=True)
+    title = models.CharField(max_length=150, default="Join our newsletter")
+    description = models.TextField(blank=True)
 
     class Meta:
         verbose_name_plural = "Newsletter settings"
 
     def __str__(self):
-        return self.notification_email
+        return self.title
 
 
 class Page(TimeStampedModel):

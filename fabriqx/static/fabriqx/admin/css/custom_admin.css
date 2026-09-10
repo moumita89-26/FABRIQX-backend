@@ -1,0 +1,66 @@
+/* Palette sampled from the supplied storefront stylesheet. */
+/* Shared form controls, including custom fields and inline rows. */
+body.change-form #content-main :is(input[type="text"], input[type="email"], input[type="password"], input[type="number"], input[type="url"], input[type="tel"], input[type="date"], input[type="time"], textarea, select:not([multiple])) {
+    box-sizing: border-box;
+    min-height: 38px;
+    padding: 8px 12px;
+    border: 1px solid var(--color-base-200, #e8d3c0);
+    border-radius: 6px;
+    background-color: var(--color-base-50, #faf5ee);
+    color: inherit;
+    font: inherit;
+    max-width: 100%;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 5%);
+}
+body.change-form #content-main :is(input, textarea, select):focus-visible {
+    outline: 2px solid var(--color-primary-600, #d18821);
+    outline-offset: 1px;
+}
+body.change-form #content-main :is(input, textarea, select):disabled {
+    opacity: .7;
+    cursor: not-allowed;
+}
+html.dark body.change-form #content-main :is(input, textarea, select) {
+    background-color: var(--color-base-900, #18181b);
+    border-color: var(--color-base-700, #3f3f46);
+}
+html:not(.dark) body { background-color: #f6e9d9; color: #48342a; }
+html:not(.dark) .bg-white { background-color: #faf5ee; }
+html:not(.dark) #nav-sidebar-inner { background-color: #f6e9d9; }
+.admin-row-actions { display: inline-flex; gap: 12px; white-space: nowrap; }
+.admin-row-action { color: var(--color-primary-700); text-decoration: underline; text-underline-offset: 3px; }
+.admin-row-action[href$="/delete/"] { color: #b91c1c; }
+.fabriqx-column-sort a { padding: 2px 4px; opacity: .55; text-decoration: none; }
+.fabriqx-column-sort a:hover, .fabriqx-column-sort a:focus-visible, .fabriqx-column-sort a[aria-current="true"] { opacity: 1; color: var(--color-primary-600, #cf831a); }
+.admin-sort-control { display:flex; align-items:center; gap:10px; padding:12px; flex-wrap:wrap; }
+.admin-sort-control select { padding:8px 30px 8px 12px; border:1px solid var(--color-base-300); border-radius:6px; background:transparent; max-width:100%; }
+.permission-matrix { width:100%; max-width:1000px; }
+.permission-matrix th, .permission-matrix td { padding:12px 16px; border-bottom:1px solid var(--color-base-200); }
+.permission-matrix th { font-weight:500; text-align:left; }
+.permission-matrix td, .permission-matrix thead th:not(:first-child) { text-align:center; min-width:70px; }
+.permission-matrix input[type="checkbox"] { width:17px; height:17px; accent-color:#d18821; cursor:pointer; }
+.admin-image-preview { border:1px dashed var(--color-base-300); border-radius:8px; padding:16px; margin-bottom:12px; max-width:720px; background:#fff; color:#48342a; }
+.admin-image-preview img { max-width:100%; max-height:320px; object-fit:contain; margin:auto; }
+.admin-image-preview [hidden] { display:none !important; }
+.gift-live-preview { display:flex; flex-wrap:wrap; gap:24px; padding:24px; background:#f6e9d9; color:#48342a; border:1px solid #e3b97d; border-radius:10px; max-width:1050px; background-position:center; background-size:cover; }
+.gift-preview-images { flex:1; min-width:180px; }
+.gift-preview-images img { max-width:100%; max-height:350px; object-fit:contain; margin:auto; }
+.gift-preview-content { flex:2; min-width:240px; }
+.gift-preview-content h2 { font-size:26px; line-height:1.3; margin:12px 0; font-family:Georgia,serif; }
+.gift-preview-content h3 { font-weight:600; margin-top:16px; }
+.gift-preview-content p { margin:8px 0; }
+.gift-preview-content > img { max-width:120px; max-height:70px; }
+.gift-preview-content small { display:block; margin-top:8px; overflow-wrap:anywhere; }
+.gift-preview-features, .gift-preview-statistics { display:flex; gap:14px; flex-wrap:wrap; margin:16px 0; }
+.gift-preview-features > div, .gift-preview-statistics > div { flex:1; text-align:center; min-width:70px; }
+.gift-preview-features img, .gift-preview-statistics img, .gift-preview-badge img { width:32px; height:32px; object-fit:contain; margin:auto; }
+.gift-preview-statistics strong { display:block; color:#9b5d12; font-size:20px; }
+.gift-preview-cta { display:inline-block; margin-top:16px; background:#2a1e18; color:#faf5ee; padding:10px 18px; }
+
+
+/* Hide the keyboard shortcut (/) badge from the changelist search box. */
+#changelist-search kbd,
+#changelist-search .keyboard-shortcut,
+#changelist-search [data-hotkey] {
+    display: none !important;
+}

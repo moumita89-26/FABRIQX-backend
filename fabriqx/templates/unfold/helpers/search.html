@@ -1,0 +1,11 @@
+{% load i18n static %}
+{% if sidebar_show_search %}
+    <div class="mb-2.5 mx-3">
+        <label class="bg-white border border-base-200 flex items-center px-3 rounded-default shadow-xs focus-within:outline-2 focus-within:outline-primary-600 dark:bg-base-900 dark:border-base-700">
+            <span class="material-symbols-outlined text-base-400" aria-hidden="true">search</span>
+            <input id="sidebar-search" type="search" placeholder="{% translate 'Search menu...' %}" aria-label="{% translate 'Search menu' %}" aria-controls="nav-sidebar-apps" autocomplete="off" class="bg-transparent min-w-0 w-full p-2 focus:outline-hidden">
+        </label>
+        <p id="sidebar-search-empty" class="px-2 py-3 text-sm" role="status" hidden>{% translate 'No matching pages.' %}</p>
+    </div>
+    <script src="{% static 'fabriqx/js/sidebar-search.js' %}" defer></script>
+{% endif %}

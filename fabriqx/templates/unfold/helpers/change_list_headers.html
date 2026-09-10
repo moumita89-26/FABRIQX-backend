@@ -1,0 +1,22 @@
+{% load i18n table_sort %}
+<thead>
+    <tr>
+        {% if cl.model_admin.ordering_field %}<th></th>{% endif %}
+        {% if cl.model_admin.list_sections|length > 0 %}<th></th>{% endif %}
+        {% for header in result_headers %}
+            <th scope="col" class="align-middle font-semibold py-2 px-3 text-left text-important whitespace-nowrap {{ header.class_attrib }}"{% if header.sorted %} aria-sort="{% if header.ascending %}ascending{% else %}descending{% endif %}"{% endif %}>
+                <div class="flex items-center gap-2">
+                    {% if header.sortable %}
+                        <a href="{{ header.url_primary }}" title="Sort by {{ header.text|striptags }}">{{ header.text|capfirst }}</a>
+                        <span class="fabriqx-column-sort inline-flex items-center" aria-label="Sort {{ header.text|striptags }}">
+                            <a href="{% column_sort_url cl forloop.counter0 'asc' %}" title="Sort {{ header.text|striptags }} ascending" aria-label="Sort {{ header.text|striptags }} ascending"{% if header.sorted and header.ascending %} aria-current="true"{% endif %}>↑</a>
+                            <a href="{% column_sort_url cl forloop.counter0 'desc' %}" title="Sort {{ header.text|striptags }} descending" aria-label="Sort {{ header.text|striptags }} descending"{% if header.sorted and not header.ascending %} aria-current="true"{% endif %}>↓</a>
+                        </span>
+                    {% else %}
+                        <span>{{ header.text|capfirst }}</span>
+                    {% endif %}
+                </div>
+            </th>
+        {% endfor %}
+    </tr>
+</thead>

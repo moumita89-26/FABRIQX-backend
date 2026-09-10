@@ -1,0 +1,23 @@
+{% load i18n l10n admin_urls unfold %}
+<div data-delete-confirmation>
+    <h2 id="delete-dialog-title">{% translate "Confirm delete" %}</h2>
+    <p>{% if queryset %}{% translate "Are you sure you want to delete the selected items?" %}{% else %}{% blocktranslate %}Are you sure you want to delete “{{ object }}”?{% endblocktranslate %}{% endif %}</p>
+    <form method="post" action="{{ request.get_full_path }}">
+        {% csrf_token %}
+        <input type="hidden" name="post" value="yes">
+        {% if queryset %}
+            {% for obj in queryset %}<input type="hidden" name="{{ action_checkbox_name }}" value="{{ obj.pk|unlocalize }}">{% endfor %}
+            <input type="hidden" name="action" value="delete_selected">
+            {% if request.POST.select_across %}<input type="hidden" name="select_across" value="{{ request.POST.select_across }}">{% endif %}
+            {% if "_dataset" in request.POST %}<input type="hidden" name="_dataset" value="{{ request.POST|index:"_dataset" }}">{% endif %}
+        {% endif %}
+        {% if is_popup %}<input type="hidden" name="{{ is_popup_var }}" value="1">{% endif %}
+        {% if to_field %}<input type="hidden" name="{{ to_field_var }}" value="{{ to_field }}">{% endif %}
+        <div class="dialog-actions">
+            <button type="button" data-delete-cancel autofocus>{% translate "No" %}</button>
+            <button type="submit">{% translate "Yes" %}</button>
+        </div>
+    </form>
+    {% url opts|admin_urlname:'changelist' as cancel_url %}
+    <a href="{{ cancel_url }}" data-delete-return hidden>{% translate "No" %}</a>
+</div>

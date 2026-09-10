@@ -126,17 +126,17 @@ UNFOLD = {
     },
     'COLORS': {
         'base': {
-            '50': '#fbf7f3',
-            '100': '#f5ede6',
-            '200': '#ead9cc',
+            '50': '#f6e9d9',
+            '100': '#efddc5',
+            '200': '#e5d8c8',
             '300': '#d9bda8',
             '400': '#bd9478',
             '500': '#9f7358',
             '600': '#80563f',
-            '700': '#633e2d',
-            '800': '#482b20',
-            '900': '#321e18',
-            '950': '#1c0f0b',
+            '700': '#5c4e3a',
+            '800': '#48342a',
+            '900': '#2a1e18',
+            '950': '#1a1209',
         },
         'primary': {
             '50': '#fff9ed',
@@ -145,7 +145,7 @@ UNFOLD = {
             '300': '#f6c469',
             '400': '#e9a345',
             '500': '#cf7e27',
-            '600': '#aa5d1d',
+            '600': '#d18821',
             '700': '#88451c',
             '800': '#71391e',
             '900': '#60321e',
@@ -171,7 +171,7 @@ ROOT_URLCONF = 'config.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / 'config' / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -210,9 +210,6 @@ DATABASES = {
 # https://docs.djangoproject.com/en/6.1/ref/settings/#auth-password-validators
 
 AUTH_PASSWORD_VALIDATORS = [
-    {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
-    },
     {
         'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
     },

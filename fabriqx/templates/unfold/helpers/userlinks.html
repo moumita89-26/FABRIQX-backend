@@ -3,12 +3,8 @@
 {% action_list %}
 {% if cl and has_add_permission %}
     {% url cl.opts|admin_urlname:"add" as add_url %}
-    <a href="{{ add_url }}"
-       class="addlink bg-primary-600 flex flex-row gap-2 items-center px-4 py-2 rounded-default text-white hover:bg-primary-700"
-       title="Add {{ cl.opts.verbose_name }}">
-        <span class="material-symbols-outlined text-[18px]">add</span>
-        <span>Add {{ cl.opts.verbose_name|capfirst }}</span>
-    </a>
+    {% blocktranslate with name=cl.opts.verbose_name|capfirst asvar add_title %}Add {{ name }}{% endblocktranslate %}
+    {% include "unfold/helpers/header_add_button.html" with add_button_url=add_url add_button_title=add_title %}
 {% elif nav_global_side %}
     {{ nav_global_side }}
 {% endif %}

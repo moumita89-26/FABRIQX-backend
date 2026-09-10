@@ -18,12 +18,6 @@
                     {% endcomponent %}
                 {% endfor %}
 
-                {% if show_save_and_continue %}
-                    {% component "unfold/components/button.html" with submit=1 form=opts.model_name|add:"_form" name="_continue" variant="default" class="w-full lg:w-auto" %}
-                        {% if can_change %}{% trans "Save and continue editing" %}{% else %}{% trans "Save and view" %}{% endif %}
-                    {% endcomponent %}
-                {% endif %}
-
                 {% if show_save_and_add_another %}
                     {% component "unfold/components/button.html" with submit=1 form=opts.model_name|add:"_form" name="_addanother" variant="default" class="w-full lg:w-auto" %}
                         {% trans "Save and add another" %}

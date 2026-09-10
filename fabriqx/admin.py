@@ -1,28 +1,35 @@
 import csv
 import json
+from uuid import uuid4
 from io import BytesIO
 from urllib.parse import urlencode
 
 from django.contrib import admin, messages
 from django import forms
+from django.forms.models import BaseInlineFormSet
 from django.apps import apps
 from django.conf import settings
-from django.contrib.auth import get_user_model
+from django.contrib.auth import get_user_model, update_session_auth_hash
+from django.contrib.auth.forms import UserCreationForm
 from django.contrib.auth.tokens import default_token_generator
+from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.models import Group, Permission
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.db import transaction
 from django.db import models as django_models
-from django.db.models import Q
+from django.db.models import Q, Case, When, Value, F, Count, Sum, OuterRef, Subquery
+from django.db.models.functions import Coalesce, Concat
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.mail import send_mail
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.template.loader import render_to_string
 from django.urls import path, reverse
 from django.utils import timezone
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
+from django.utils.text import slugify
 from openpyxl import Workbook
 from unfold.admin import ModelAdmin, StackedInline, TabularInline
 from unfold.contrib.forms.widgets import WysiwygWidget
@@ -37,8 +44,8 @@ from .product_import import SAMPLE_COLUMNS, SAMPLE_ROW, import_products as run_p
 # Only models represented by a visible, delegable admin-sidebar item belong in
 # the staff access matrix. Admin-account management stays superuser-only.
 STAFF_MENU_MODELS = {
-    "content_management": {"banner", "brandlogosection", "footersocialsection", "giftsection", "newslettersettings", "newslettersubscription", "offerbanner", "offergridsection", "page", "testimonial"},
-    "customers": {"customerprofile", "wishlistitem"},
+    "content_management": {"banner", "brandlogo", "footersocialsection", "giftsection", "newslettersettings", "newslettersubscription", "offerbanner", "offergridsection", "page", "testimonial"},
+    "customers": {"customerprofile"},
     "influencers": {"influencerprofile", "influencerreport"},
     "products": {"category", "coupon", "inventorymovement", "inventoryreport", "productimage", "productvariant", "product"},
 }
@@ -55,11 +62,27 @@ def staff_permission_queryset():
     allowed = Q()
     for app_label, model_names in STAFF_MENU_MODELS.items():
         allowed |= Q(content_type__app_label=app_label, content_type__model__in=model_names)
-    return Permission.objects.filter(allowed).exclude(
-        content_type__app_label="content_management",
-        content_type__model="newslettersubscription",
-        codename="add_newslettersubscription",
-    )
+    permissions = Permission.objects.filter(allowed)
+    unavailable = {
+        ("content_management", "newslettersubscription"): ("add",),
+        ("customers", "customerprofile"): ("add", "delete"),
+        ("products", "inventoryreport"): ("add", "change", "delete"),
+        ("influencers", "influencerreport"): ("add", "change", "delete"),
+    }
+    for (app_label, model_name), actions in unavailable.items():
+        permissions = permissions.exclude(content_type__app_label=app_label, content_type__model=model_name,
+                                          codename__in=[f"{action}_{model_name}" for action in actions])
+    return permissions
+
+
+def normalize_unique_user_email(email, exclude_user_id=None):
+    email = email.strip().lower()
+    users = get_user_model().objects.filter(email__iexact=email)
+    if exclude_user_id is not None:
+        users = users.exclude(pk=exclude_user_id)
+    if users.exists():
+        raise forms.ValidationError("An account with this email address already exists.")
+    return email
 
 
 class ExportMixin:
@@ -95,49 +118,203 @@ class ExportMixin:
         response["Content-Disposition"] = f'attachment; filename="{self.model._meta.model_name}.xlsx"'
         return response
 
+class AdminListToolsMixin:
+    list_filter_submit = True
 
-class BaseAdmin(ExportMixin, ModelAdmin):
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj, **kwargs)
+        for field in form.base_fields.values():
+            widget = field.widget
+            if isinstance(widget, forms.widgets.Input) and widget.input_type in {
+                "text", "email", "password", "number", "url", "tel", "search",
+            }:
+                classes = widget.attrs.get("class", "").split()
+                widget.attrs["class"] = " ".join(dict.fromkeys([*classes, *INPUT_CLASSES]))
+        return form
+
+    def get_queryset(self, request):
+        queryset = super().get_queryset(request)
+        columns = self.get_list_display(request)
+        annotations = {}
+        if "stock" in columns:
+            annotations["_sort_stock"] = Coalesce(Sum("variants__stock_quantity"), 0)
+        if "usage_count" in columns:
+            annotations["_sort_usage_count"] = Count("usages", distinct=True)
+        if "referred_orders" in columns:
+            annotations["_sort_referred_orders"] = Count("orders", distinct=True)
+        if "payment_state" in columns:
+            latest = m.Payment.objects.filter(order_id=OuterRef("pk")).order_by("-created_at", "-pk")
+            annotations["_sort_payment_state"] = Coalesce(Subquery(latest.values("status")[:1]), Value("Not recorded"))
+        return queryset.annotate(**annotations) if annotations else queryset
+
+    @admin.display(description="Effective price", ordering=Case(
+        When(price_override__gt=0, then=F("price_override")),
+        When(product__sale_price__gt=0, then=F("product__sale_price")),
+        default=F("product__regular_price"),
+    ))
+    def effective_price(self, obj):
+        return obj.effective_price
+
+    @admin.display(description="Stock status", ordering=Case(
+        When(stock_quantity=0, then=Value("Out of stock")),
+        When(stock_quantity__lte=F("low_stock_threshold"), then=Value("Low stock")),
+        default=Value("In stock"),
+    ))
+    def stock_status(self, obj):
+        return obj.stock_status
+
+    def get_list_filter(self, request):
+        return ()
+
+    def get_search_fields(self, request):
+        configured = super().get_search_fields(request)
+        return configured or tuple(
+            field.name
+            for field in self.model._meta.fields
+            if isinstance(field, (django_models.CharField, django_models.TextField))
+            and field.name not in {"password", "token", "secret"}
+        )
+
+
+class BaseAdmin(AdminListToolsMixin, ExportMixin, ModelAdmin):
     list_per_page = 40
     save_on_top = True
     hide_from_index = False
+
     formfield_overrides = {
         django_models.TextField: {"widget": WysiwygWidget},
     }
+
+    # Hide audit timestamp fields from all normal admin forms.
+    hidden_audit_fields = {
+        "created_at",
+        "updated_at",
+    }
+
+    def render_change_form(
+        self,
+        request,
+        context,
+        add=False,
+        change=False,
+        form_url="",
+        obj=None,
+    ):
+        context["show_save_and_continue"] = False
+        context["show_save_and_add_another"] = False
+
+        return super().render_change_form(
+            request,
+            context,
+            add=add,
+            change=change,
+            form_url=form_url,
+            obj=obj,
+        )
+
+    @property
+    def media(self):
+        return super().media + forms.Media(
+            css={
+                "all": (
+                    "fabriqx/admin/css/custom_admin.css",
+                )
+            },
+
+        )
 
     def get_model_perms(self, request):
         if self.hide_from_index:
             return {}
         return super().get_model_perms(request)
 
+    def get_fields(self, request, obj=None):
+        fields = super().get_fields(request, obj)
+        return tuple(
+            field
+            for field in fields
+            if field not in self.hidden_audit_fields
+        )
+
+    def get_fieldsets(self, request, obj=None):
+        fieldsets = super().get_fieldsets(request, obj)
+        cleaned_fieldsets = []
+
+        for title, options in fieldsets:
+            # Remove any fieldset explicitly named "Audit".
+            if title and str(title).strip().lower() == "audit":
+                continue
+
+            cleaned_fields = []
+
+            for field in options.get("fields", ()):
+                if isinstance(field, str):
+                    if field not in self.hidden_audit_fields:
+                        cleaned_fields.append(field)
+
+                elif isinstance(field, (tuple, list)):
+                    group = tuple(
+                        item
+                        for item in field
+                        if item not in self.hidden_audit_fields
+                    )
+                    if group:
+                        cleaned_fields.append(group)
+
+                else:
+                    cleaned_fields.append(field)
+
+            if not cleaned_fields:
+                continue
+
+            new_options = options.copy()
+            new_options["fields"] = tuple(cleaned_fields)
+            cleaned_fieldsets.append((title, new_options))
+
+        return tuple(cleaned_fieldsets)
+
     def get_list_display(self, request):
         columns = list(super().get_list_display(request))
-        if self.has_change_permission(request) and "edit_row_action" not in columns:
-            columns.append("edit_row_action")
-        if self.has_delete_permission(request) and "delete_row_action" not in columns:
-            columns.append("delete_row_action")
+        can_edit = self.has_change_permission(request)
+        can_delete = self.has_delete_permission(request)
+
+        if can_edit or can_delete:
+            @admin.display(description="Action")
+            def row_actions(obj):
+                links = []
+
+                if can_edit:
+                    change_url = reverse(
+                        f"admin:{obj._meta.app_label}_{obj._meta.model_name}_change",
+                        args=(obj.pk,),
+                    )
+                    links.append(
+                        format_html(
+                            '<a class="inline-flex items-center rounded-default bg-primary-600 px-3 py-1.5 font-medium text-white hover:bg-primary-700" href="{}">Edit</a>',
+                            change_url,
+                        )
+                    )
+
+                if can_delete:
+                    delete_url = reverse(
+                        f"admin:{obj._meta.app_label}_{obj._meta.model_name}_delete",
+                        args=(obj.pk,),
+                    )
+                    links.append(
+                        format_html(
+                            '<a class="inline-flex items-center rounded-default bg-red-600 px-3 py-1.5 font-medium text-white hover:bg-red-700" href="{}">Delete</a>',
+                            delete_url,
+                        )
+                    )
+
+                return format_html(
+                    '<div class="flex items-center gap-2">{}</div>',
+                    format_html_join("", "{}", ((link,) for link in links)),
+                )
+
+            columns.append(row_actions)
+
         return columns
-
-    @admin.display(description="Edit")
-    def edit_row_action(self, obj):
-        change_url = reverse(
-            f"admin:{obj._meta.app_label}_{obj._meta.model_name}_change",
-            args=(obj.pk,),
-        )
-        return format_html(
-            '<a class="inline-flex items-center rounded-default bg-primary-600 px-3 py-1.5 font-medium text-white hover:bg-primary-700" href="{}">Edit</a>',
-            change_url,
-        )
-
-    @admin.display(description="Delete")
-    def delete_row_action(self, obj):
-        delete_url = reverse(
-            f"admin:{obj._meta.app_label}_{obj._meta.model_name}_delete",
-            args=(obj.pk,),
-        )
-        return format_html(
-            '<a class="inline-flex items-center rounded-default bg-red-600 px-3 py-1.5 font-medium text-white hover:bg-red-700" href="{}">Delete</a>',
-            delete_url,
-        )
 
 
 class ProductImageInline(TabularInline):
@@ -147,17 +324,38 @@ class ProductImageInline(TabularInline):
 
 class ProductVariantInline(TabularInline):
     model = m.ProductVariant
-    extra = 1
+    extra = 0
+    min_num = 1
+
+    def get_formset(self, request, obj=None, **kwargs):
+        kwargs["validate_min"] = True
+        return super().get_formset(request, obj, **kwargs)
 
 
 @admin.register(m.Category)
 class CategoryAdmin(BaseAdmin):
-    list_display = ("drag_handle", "name", "parent", "audience", "display_order", "is_active", "updated_at")
-    list_filter = ("audience", "is_active", "parent")
+    class CategoryForm(forms.ModelForm):
+        class Meta:
+            model = m.Category
+            exclude = ("audience",)
+
+        def clean(self):
+            cleaned = super().clean()
+            name = cleaned.get("name")
+            if name:
+                # Never trust a stale value left behind by prepopulation JS.
+                cleaned["slug"] = slugify(name)
+                self.instance.slug = cleaned["slug"]
+            return cleaned
+
+    form = CategoryForm
+    list_display = ("drag_handle", "name", "parent", "display_order", "is_active", "updated_at")
+    list_filter = ("is_active", "parent")
     search_fields = ("name", "slug", "description")
     prepopulated_fields = {"slug": ("name",)}
     list_editable = ("is_active",)
     readonly_fields = ("display_order",)
+    exclude = ("audience",)
 
     class Media:
         css = {"all": ("fabriqx/admin/category_sort.css",)}
@@ -242,8 +440,13 @@ class ProductAdmin(BaseAdmin):
                     level = messages.WARNING if counts["failed"] else messages.SUCCESS
                     summary = f"Processed {counts['rows']} rows: {counts['products']} products, {counts['variants']} variants and {counts['images']} images created; {counts['failed']} rows failed."
                     self.message_user(request, summary, level)
-                    for error in errors[:10]:
-                        self.message_user(request, error, messages.ERROR)
+                    if errors:
+                        visible_errors = errors[:5]
+                        hidden_count = len(errors) - len(visible_errors)
+                        error_summary = "Import issues: " + " | ".join(visible_errors)
+                        if hidden_count:
+                            error_summary += f" | Plus {hidden_count} more distinct error type(s)."
+                        self.message_user(request, error_summary, messages.ERROR)
                     return redirect("admin:products_product_changelist")
         context = {**self.admin_site.each_context(request), "title": "Import products", "opts": self.model._meta}
         return render(request, "fabriqx/product_import.html", context)
@@ -269,7 +472,7 @@ class ProductAdmin(BaseAdmin):
         response["Content-Disposition"] = 'attachment; filename="fabriqx-product-import-sample.xlsx"'
         return response
 
-    @admin.display(description="Stock", ordering="variants__stock_quantity")
+    @admin.display(description="Stock", ordering="_sort_stock")
     def stock(self, obj):
         return obj.total_stock
 
@@ -322,17 +525,67 @@ class WishlistInline(TabularInline):
 
 @admin.register(m.CustomerProfile)
 class CustomerAdmin(BaseAdmin):
-    list_display = ("user", "phone", "is_active", "marketing_consent", "order_count", "created_at")
-    list_filter = ("is_active", "marketing_consent", "created_at")
+    class CustomerChangeForm(forms.ModelForm):
+        username = forms.CharField(disabled=True)
+        first_name = forms.CharField(max_length=150, required=True)
+        last_name = forms.CharField(max_length=150, required=False)
+        email = forms.EmailField(required=True)
+        phone = forms.CharField(max_length=30, required=True)
+
+        class Meta:
+            model = m.CustomerProfile
+            fields = ("username", "first_name", "last_name", "email", "phone", "date_of_birth")
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            if self.instance.pk:
+                self.initial.update({
+                    "username": self.instance.user.username,
+                    "first_name": self.instance.user.first_name,
+                    "last_name": self.instance.user.last_name,
+                    "email": self.instance.user.email,
+                })
+
+        def clean_email(self):
+            current_user_id = self.instance.user_id if self.instance.pk else None
+            return normalize_unique_user_email(self.cleaned_data["email"], current_user_id)
+
+    form = CustomerChangeForm
+    list_display = ("user", "phone", "created_at", "edit_row_action")
+    list_filter = ("created_at",)
     search_fields = ("user__username", "user__first_name", "user__last_name", "user__email", "phone")
-    autocomplete_fields = ("user",)
-    inlines = (AddressInline, WishlistInline)
+    inlines = (AddressInline,)
+    fields = ("username", "first_name", "last_name", "email", "phone", "date_of_birth", "created_at", "updated_at")
+    readonly_fields = ("created_at", "updated_at")
     actions = ExportMixin.actions + ("send_password_reset",)
+
+    @admin.display(description="Edit")
+    def edit_row_action(self, obj):
+        change_url = reverse("admin:customers_customerprofile_change", args=(obj.pk,))
+        return format_html(
+            '<a class="inline-flex items-center rounded-default bg-primary-600 px-3 py-1.5 font-medium text-white hover:bg-primary-700" href="{}">Edit</a>',
+            change_url,
+        )
 
     def has_add_permission(self, request):
         return False
 
-    @admin.action(description="Email secure password reset link", permissions=("change",))
+    def has_change_permission(self, request, obj=None):
+        return super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    @transaction.atomic
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        user = obj.user
+        user.first_name = form.cleaned_data["first_name"]
+        user.last_name = form.cleaned_data["last_name"]
+        user.email = form.cleaned_data["email"]
+        user.save(update_fields=("first_name", "last_name", "email"))
+
+    @admin.action(description="Email secure password reset link", permissions=("view",))
     def send_password_reset(self, request, queryset):
         sent = 0
         skipped = 0
@@ -360,11 +613,6 @@ class CustomerAdmin(BaseAdmin):
         level = messages.SUCCESS if sent else messages.WARNING
         self.message_user(request, f"Sent {sent} password reset email(s); skipped {skipped} account(s).", level)
 
-    @admin.display(description="Orders")
-    def order_count(self, obj):
-        return obj.orders.count()
-
-
 @admin.register(m.UserRole)
 class UserRoleAdmin(BaseAdmin):
     hide_from_index = True
@@ -381,6 +629,15 @@ class UserRoleAdmin(BaseAdmin):
         def get_context(self, name, value, attrs):
             context = super().get_context(name, value, attrs)
             selected = {str(getattr(item, "pk", item)) for item in (value or [])}
+            # Preserve existing section grants when staff access is edited in the new logo matrix.
+            legacy_actions = Permission.objects.filter(
+                pk__in=selected, content_type__app_label="content_management",
+                content_type__model="brandlogosection",
+            ).values_list("codename", flat=True)
+            logo_codes = [f"{code.split('_', 1)[0]}_brandlogo" for code in legacy_actions]
+            selected.update(str(pk) for pk in self.queryset.filter(
+                content_type__app_label="content_management", codename__in=logo_codes,
+            ).values_list("pk", flat=True))
             groups = {}
             allowed_actions = {"add", "view", "change", "delete"}
             for permission in self.queryset.select_related("content_type").order_by("content_type__app_label", "content_type__model", "codename"):
@@ -412,6 +669,10 @@ class UserRoleAdmin(BaseAdmin):
                     row["write_permissions"] = write_permissions
                     row["read_checked"] = bool(read_permission and read_permission["checked"])
                     row["write_checked"] = bool(write_permissions) and all(permission["checked"] for permission in write_permissions)
+                    row["cells"] = [
+                        {"label": label, "permission": row["permissions"].get(action)}
+                        for action, label in (("view", "View"), ("add", "Add"), ("change", "Edit"), ("delete", "Delete"))
+                    ]
                     rows.append(row)
                 matrix_groups.append({"name": group["name"], "models": rows})
             context["widget"]["matrix_groups"] = matrix_groups
@@ -465,7 +726,10 @@ class UserRoleAdmin(BaseAdmin):
         ("Permissions", {"fields": ("permissions",)}),
     )
 
-    @admin.display(boolean=True, description="Admin access")
+    @admin.display(boolean=True, description="Admin access", ordering=Case(
+        When(Q(role="admin") | Q(user__is_superuser=True), then=Value(True)),
+        default=Value(False),
+    ))
     def staff_access(self, obj):
         return obj.role == m.UserRole.Role.ADMIN or obj.user.is_superuser
 
@@ -478,20 +742,22 @@ class UserRoleInline(StackedInline):
     fields = ("role",)
 
 
-class FabriqxUserAdmin(BaseUserAdmin, ModelAdmin):
+class FabriqxUserAdmin(AdminListToolsMixin, BaseUserAdmin, ModelAdmin):
     permission_queryset = staff_permission_queryset()
+    readonly_fields = ("role_display",)
+    list_filter = ()
 
-    class AdminAccountCreationForm(BaseUserAdmin.add_form):
+    class AdminAccountCreationForm(UserCreationForm):
+        class Meta(UserCreationForm.Meta):
+            fields = ("first_name", "last_name", "email")
+
+        def save(self, commit=True):
+            self.instance.username = "staff_" + uuid4().hex
+            return super().save(commit=commit)
+
         email = forms.EmailField(
             required=True,
             widget=forms.EmailInput(attrs={"class": " ".join(INPUT_CLASSES)}),
-        )
-        role = forms.ChoiceField(
-            label="Account type",
-            choices=((m.UserRole.Role.ADMIN, "Admin / Staff"),),
-            initial=m.UserRole.Role.ADMIN,
-            disabled=True,
-            help_text="Customer and influencer accounts must be created from their dedicated flows.",
         )
         permissions = forms.ModelMultipleChoiceField(
             queryset=staff_permission_queryset(),
@@ -505,8 +771,20 @@ class FabriqxUserAdmin(BaseUserAdmin, ModelAdmin):
                 self.fields[field_name].widget.attrs["class"] = password_input_classes
             self.fields["permissions"].widget = UserRoleAdmin.PermissionMatrixWidget(self.fields["permissions"].queryset)
 
+        def clean_email(self):
+            return normalize_unique_user_email(self.cleaned_data["email"])
+
     class UserWithRoleForm(BaseUserAdmin.form):
-        role = forms.ChoiceField(choices=((m.UserRole.Role.ADMIN, "Admin / Staff"),), disabled=True)
+        password = None
+        password1 = forms.CharField(
+            label="Password", required=False, strip=False,
+            widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
+            help_text="Leave blank to keep the current password.",
+        )
+        password2 = forms.CharField(
+            label="Confirm password", required=False, strip=False,
+            widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
+        )
         permissions = forms.ModelMultipleChoiceField(
             queryset=staff_permission_queryset(),
             required=False,
@@ -516,14 +794,39 @@ class FabriqxUserAdmin(BaseUserAdmin, ModelAdmin):
             super().__init__(*args, **kwargs)
             self.fields["permissions"].widget = UserRoleAdmin.PermissionMatrixWidget(self.fields["permissions"].queryset)
             self.fields["is_superuser"].disabled = True
+            self.fields["username"].help_text = ""
             self.fields["is_superuser"].help_text = "The site has one protected Super Admin account. This status cannot be changed here."
-            try:
-                user_role = self.instance.fabriqx_role
-                role = user_role.role
-            except m.UserRole.DoesNotExist:
-                role = m.UserRole.Role.ADMIN
-            self.initial["role"] = role
             self.initial["permissions"] = list(self.instance.user_permissions.values_list("pk", flat=True))
+
+        def clean_email(self):
+            return normalize_unique_user_email(self.cleaned_data["email"], self.instance.pk)
+
+        def clean(self):
+            cleaned_data = super().clean()
+            password = cleaned_data.get("password1")
+            confirmation = cleaned_data.get("password2")
+            if password != confirmation:
+                self.add_error("password2", "Passwords do not match.")
+            return cleaned_data
+
+        def _post_clean(self):
+            super()._post_clean()
+            password = self.cleaned_data.get("password1")
+            if password:
+                try:
+                    validate_password(password, self.instance)
+                except ValidationError as error:
+                    self.add_error("password1", error)
+
+        def save(self, commit=True):
+            user = super().save(commit=False)
+            password = self.cleaned_data.get("password1")
+            if password:
+                user.set_password(password)
+            if commit:
+                user.save()
+                self.save_m2m()
+            return user
 
     form = UserWithRoleForm
     add_form = AdminAccountCreationForm
@@ -540,15 +843,15 @@ class FabriqxUserAdmin(BaseUserAdmin, ModelAdmin):
     list_filter = BaseUserAdmin.list_filter + ("fabriqx_role__role",)
     inlines = ()
     fieldsets = (
-        (None, {"fields": ("username", "password")}),
+        (None, {"fields": ("username", "password1", "password2")}),
         ("Personal info", {"fields": ("first_name", "last_name", "email")}),
-        ("Account status", {"fields": ("is_active", "is_staff", "is_superuser")}),
-        ("Role and permissions", {"fields": ("role", "permissions")}),
+        ("Account status", {"fields": ("role_display", "is_active", "is_staff", "is_superuser")}),
+        ("Access permissions", {"fields": ("permissions",)}),
         ("Important dates", {"fields": ("last_login", "date_joined")}),
     )
     add_fieldsets = (
-        (None, {"fields": ("username", "email", "password1", "password2")}),
-        ("Role and access permissions", {"fields": ("role", "permissions")}),
+        (None, {"fields": ("first_name", "last_name", "email", "password1", "password2")}),
+        ("Access permissions", {"fields": ("permissions",)}),
     )
 
     def has_add_permission(self, request):
@@ -610,10 +913,10 @@ class FabriqxUserAdmin(BaseUserAdmin, ModelAdmin):
         initial_password = form.cleaned_data.get("password1") if not change else None
 
         super().save_model(request, obj, form, change)
-        role_name = m.UserRole.Role.ADMIN if not change else form.cleaned_data.get("role")
-        if role_name:
-            user_role, _ = m.UserRole.objects.update_or_create(user=obj, defaults={"role": role_name})
-            obj.user_permissions.set(form.cleaned_data.get("permissions", Permission.objects.none()))
+        m.UserRole.objects.update_or_create(user=obj, defaults={"role": m.UserRole.Role.ADMIN})
+        obj.user_permissions.set(form.cleaned_data.get("permissions", Permission.objects.none()))
+        if change and obj.pk == request.user.pk and form.cleaned_data.get("password1"):
+            update_session_auth_hash(request, obj)
 
         if not change and obj.email:
             recipient = obj.email
@@ -653,7 +956,12 @@ class FabriqxUserAdmin(BaseUserAdmin, ModelAdmin):
 
             transaction.on_commit(send_access_email)
 
-    @admin.display(description="Role", ordering="fabriqx_role__role")
+    @admin.display(description="Role", ordering=Case(
+        When(is_superuser=True, then=Value("Super Admin")),
+        When(fabriqx_role__role="admin", then=Value("Admin")),
+        When(fabriqx_role__role="influencer", then=Value("Influencer")),
+        default=Value("Customer"),
+    ))
     def role_display(self, obj):
         if obj.is_superuser:
             return "Super Admin"
@@ -665,13 +973,36 @@ class FabriqxUserAdmin(BaseUserAdmin, ModelAdmin):
 
 @admin.register(m.Coupon)
 class CouponAdmin(BaseAdmin):
+    class CouponForm(forms.ModelForm):
+        class Meta:
+            model = m.Coupon
+            fields = "__all__"
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.fields["starts_at"].help_text = "Start date cannot be earlier than today."
+            widget = self.fields["starts_at"].widget
+            if hasattr(widget, "widgets") and widget.widgets:
+                widget.widgets[0].attrs["min"] = timezone.localdate().isoformat()
+
+        def clean_starts_at(self):
+            starts_at = self.cleaned_data.get("starts_at")
+            if (
+                not self.instance.pk
+                and starts_at
+                and timezone.localdate(starts_at) < timezone.localdate()
+            ):
+                raise forms.ValidationError("Start date cannot be earlier than today.")
+            return starts_at
+
+    form = CouponForm
     list_display = ("code", "discount_type", "discount_value", "starts_at", "expires_at", "usage_count", "is_active")
     list_filter = ("discount_type", "is_active", "starts_at", "expires_at")
     search_fields = ("code", "description")
     filter_horizontal = ("categories", "products", "influencers")
     list_editable = ("is_active",)
 
-    @admin.display(description="Uses")
+    @admin.display(description="Uses", ordering="_sort_usage_count")
     def usage_count(self, obj):
         return obj.usages.count()
 
@@ -710,9 +1041,9 @@ class OrderAdmin(BaseAdmin):
     actions = ExportMixin.actions + ("mark_confirmed", "mark_processing", "mark_shipped", "mark_delivered", "mark_cancelled")
     export_fields = ("number", "placed_at", "email", "phone", "status", "subtotal", "discount_total", "shipping_total", "tax_total", "grand_total")
 
-    @admin.display(description="Payment")
+    @admin.display(description="Payment", ordering="_sort_payment_state")
     def payment_state(self, obj):
-        payment = obj.payments.order_by("-created_at").first()
+        payment = obj.payments.order_by("-created_at", "-pk").first()
         return payment.get_status_display() if payment else "Not recorded"
 
     def _set_status(self, request, queryset, status):
@@ -796,19 +1127,25 @@ class InfluencerAdmin(BaseAdmin):
             return username
 
         def clean_email(self):
-            email = self.cleaned_data["email"].strip().lower()
-            users = get_user_model().objects.filter(email__iexact=email)
-            if self.instance and self.instance.pk:
-                users = users.exclude(pk=self.instance.user_id)
-            if users.exists():
-                raise forms.ValidationError("An account with this email address already exists.")
-            return email
+            current_user_id = self.instance.user_id if self.instance and self.instance.pk else None
+            return normalize_unique_user_email(self.cleaned_data["email"], current_user_id)
 
         def clean(self):
             cleaned = super().clean()
             password = cleaned.get("password")
             if not self.instance.pk and not password:
                 self.add_error("password", "A password is required for a new influencer.")
+            if password:
+                user = self.instance.user if self.instance and self.instance.pk else get_user_model()(
+                    username=cleaned.get("username", ""),
+                    email=cleaned.get("email", ""),
+                    first_name=cleaned.get("first_name", ""),
+                    last_name=cleaned.get("last_name", ""),
+                )
+                try:
+                    validate_password(password, user=user)
+                except ValidationError as error:
+                    self.add_error("password", error)
             if password != cleaned.get("confirm_password"):
                 self.add_error("confirm_password", "Passwords do not match.")
             return cleaned
@@ -841,7 +1178,7 @@ class InfluencerAdmin(BaseAdmin):
             return profile
 
     form = InfluencerForm
-    list_display = ("affiliate_id", "user", "referred_orders", "is_active")
+    list_display = ("affiliate_id", "user", "is_active")
     list_filter = ("is_active", "created_at")
     search_fields = ("affiliate_id", "user__username", "user__first_name", "user__last_name", "user__email")
     readonly_fields = ("affiliate_id", "created_at", "updated_at")
@@ -852,7 +1189,7 @@ class InfluencerAdmin(BaseAdmin):
         ("Audit", {"fields": ("created_at", "updated_at"), "classes": ("collapse",)}),
     )
 
-    @admin.display(description="Orders")
+    @admin.display(description="Orders", ordering="_sort_referred_orders")
     def referred_orders(self, obj): return obj.orders.count()
 
     def save_model(self, request, obj, form, change):
@@ -945,6 +1282,28 @@ class SimpleAdmin(BaseAdmin):
     list_display = ("__str__",)
     search_fields = ("id",)
 
+    def get_sortable_by(self, request):
+        # Display callables are created per request; use their ordering metadata.
+        return None
+
+    def get_list_display(self, request):
+        ordering = {
+            "productimage": F("product__name"),
+            "address": Concat("full_name", Value(", "), "city"),
+            "wishlistitem": Concat("customer__user__username", Value(" — "), "product__name"),
+            "orderitem": Concat("order__number", Value(" — "), "product_name"),
+            "orderstatushistory": Concat("order__number", Value(": "), "from_status", Value(" → "), "to_status"),
+        }.get(self.model._meta.model_name)
+        columns = super().get_list_display(request)
+        if ordering is None:
+            return columns
+
+        @admin.display(description=self.model._meta.verbose_name, ordering=ordering)
+        def record_label(obj):
+            return str(obj)
+
+        return tuple(record_label if column == "__str__" else column for column in columns)
+
 
 @admin.register(m.Payment)
 class PaymentAdmin(BaseAdmin):
@@ -976,19 +1335,121 @@ class InvoiceAdmin(BaseAdmin):
         return format_html('<a href="{}" target="_blank">Print / Save PDF</a>', url)
 
 
+class BannerAdminForm(forms.ModelForm):
+    class Meta:
+        model = m.Banner
+        fields = "__all__"
+        help_texts = {
+            "image": m.BANNER_LOGO_IMAGE_HELP_TEXT,
+        }
+        labels = {
+            "image": "Change Image",
+            "link": "Shop Now Button URL",
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        if "image" in self.fields:
+            self.fields["image"].widget.attrs.update({
+                "accept": ".jpg,.jpeg,.png,.gif",
+            })
+
+    def clean_image(self):
+        image = self.cleaned_data.get("image")
+
+        if image and hasattr(image, "size"):
+            if image.size > 5 * 1024 * 1024:
+                raise forms.ValidationError(
+                    "Image file size must not exceed 5 MB."
+                )
+
+        return image
+
+
 @admin.register(m.Banner)
 class BannerAdmin(BaseAdmin):
-    list_display = ("title", "display_order", "starts_at", "ends_at", "is_active")
-    list_filter = ("is_active", "starts_at", "ends_at")
-    search_fields = ("title", "subtitle")
-    list_editable = ("display_order", "is_active")
+    form = BannerAdminForm
+
+    list_display = (
+        "title",
+        "display_order",
+        "is_active",
+    )
+    search_fields = (
+        "title",
+        "subtitle",
+    )
+    list_editable = (
+        "is_active",
+    )
+
+    readonly_fields = (
+        "image_preview",
+    )
+
+    # Banner add/edit page: requested fields only.
+    fields = (
+        "image",
+        "title",
+        "subtitle",
+        "link",
+    )
+
+    @admin.display(description="Image Preview")
+    def image_preview(self, obj):
+        image_url = ""
+
+        if obj and obj.pk and obj.image:
+            try:
+                image_url = obj.image.url
+            except Exception:
+                image_url = ""
+
+        return format_html(
+            """
+            <div
+                id="banner-preview-wrapper"
+                class="banner-preview-wrapper"
+                style="display:{};"
+            >
+                <img
+                    id="banner-image-preview"
+                    class="banner-image-preview"
+                    src="{}"
+                    alt="Banner preview"
+                    style="
+                        display:block;
+                        max-width:520px;
+                        max-height:260px;
+                        width:auto;
+                        height:auto;
+                        object-fit:contain;
+                        border:1px solid #e5e7eb;
+                        border-radius:8px;
+                        padding:6px;
+                        background:#fff;
+                    "
+                />
+            </div>
+            <div
+                id="banner-preview-empty"
+                style="display:{}; color:#6b7280;"
+            >
+                Select an image to preview it here.
+            </div>
+            """,
+            "block" if image_url else "none",
+            image_url,
+            "none" if image_url else "block",
+        )
 
 
 @admin.register(m.HomepageSection)
 class SectionAdmin(BaseAdmin):
     list_display = ("title", "section_type", "display_order", "is_active", "updated_at")
     list_filter = ("section_type", "is_active")
-    list_editable = ("display_order", "is_active")
+    list_editable = ("is_active",)
     fieldsets = (
         (None, {"fields": ("title", "section_type", "editor_content", "display_order", "is_active")}),
     )
@@ -997,10 +1458,12 @@ class SectionAdmin(BaseAdmin):
 class GiftSectionFeatureInline(TabularInline):
     model = m.GiftSectionFeature
     extra = 5
+    min_num = 5
     max_num = 5
     fields = ("icon", "text", "display_order", "is_active")
 
     def get_formset(self, request, obj=None, **kwargs):
+        kwargs["validate_min"] = True
         kwargs["validate_max"] = True
         return super().get_formset(request, obj, **kwargs)
 
@@ -1024,10 +1487,12 @@ class GiftSectionStatisticInline(TabularInline):
     model = m.GiftSectionStatistic
     form = GiftSectionStatisticForm
     extra = 3
+    min_num = 3
     max_num = 3
     fields = ("icon", "eyebrow", "value", "label", "display_order", "is_active")
 
     def get_formset(self, request, obj=None, **kwargs):
+        kwargs["validate_min"] = True
         kwargs["validate_max"] = True
         return super().get_formset(request, obj, **kwargs)
 
@@ -1043,34 +1508,196 @@ class GiftSectionStatisticInline(TabularInline):
 
 @admin.register(m.GiftSection)
 class GiftSectionAdmin(BaseAdmin):
-    list_display = ("internal_name", "heading", "display_order", "starts_at", "ends_at", "is_active")
-    list_filter = ("is_active", "starts_at", "ends_at")
-    list_editable = ("display_order", "is_active")
-    search_fields = ("internal_name", "heading", "description")
-    inlines = (GiftSectionFeatureInline, GiftSectionStatisticInline)
+    list_display = (
+        "internal_name",
+        "heading",
+        "is_active",
+    )
+    list_editable = (
+        "is_active",
+    )
+    search_fields = (
+        "internal_name",
+        "heading",
+        "description",
+    )
+
+    # Features and statistics stay on the same Gift Section edit page.
+    inlines = (
+        GiftSectionFeatureInline,
+        GiftSectionStatisticInline,
+    )
+
     fieldsets = (
-        ("Campaign", {"fields": ("internal_name", "display_order", "starts_at", "ends_at", "is_active")}),
-        ("Offer badge", {"fields": ("badge_eyebrow", "badge_title", "badge_icon")}),
-        ("Main content", {"fields": ("logo", "accent_heading", "heading", "description", "main_image", "gift_image", "background_image")}),
-        ("Thank-you message", {"fields": ("thank_you_title", "thank_you_text")}),
-        ("Call to action", {"fields": ("cta_label", "cta_url")}),
+        (
+            "Campaign",
+            {
+                "fields": (
+                    "internal_name",
+                    "display_order",
+                    "starts_at",
+                    "ends_at",
+                    "is_active",
+                )
+            },
+        ),
+        (
+            "Offer badge",
+            {
+                "fields": (
+                    "badge_eyebrow",
+                    "badge_title",
+                    "badge_icon",
+                )
+            },
+        ),
+        (
+            "Main content",
+            {
+                "fields": (
+                    "logo",
+                    "accent_heading",
+                    "heading",
+                    "description",
+                    "main_image",
+                    "gift_image",
+                    "background_image",
+                )
+            },
+        ),
+        (
+            "Thank-you message",
+            {
+                "fields": (
+                    "thank_you_title",
+                    "thank_you_text",
+                )
+            },
+        ),
+        (
+            "Call to action",
+            {
+                "fields": (
+                    "cta_label",
+                    "cta_url",
+                )
+            },
+        ),
     )
 
     def has_add_permission(self, request):
-        return super().has_add_permission(request) and not m.GiftSection.objects.exists()
+        return (
+            super().has_add_permission(request)
+            and not m.GiftSection.objects.exists()
+        )
 
-    def render_change_form(self, request, context, add=False, change=False, form_url="", obj=None):
+    def render_change_form(
+        self,
+        request,
+        context,
+        add=False,
+        change=False,
+        form_url="",
+        obj=None,
+    ):
         context["show_save_and_add_another"] = False
-        return super().render_change_form(request, context, add, change, form_url, obj)
+        return super().render_change_form(
+            request,
+            context,
+            add,
+            change,
+            form_url,
+            obj,
+        )
+
+
+class BrandLogoFormSet(BaseInlineFormSet):
+    def clean(self):
+        super().clean()
+        additions = [form for form in self.extra_forms if form.has_changed() and not form.cleaned_data.get("DELETE")]
+        if len(additions) > 1:
+            raise forms.ValidationError("Only one brand logo can be added at a time.")
+
+
+class BrandLogoAdminForm(forms.ModelForm):
+    class Meta:
+        model = m.BrandLogo
+        fields = "__all__"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["logo"].widget.attrs["accept"] = ".jpg,.jpeg,.png,.gif"
+        self.fields["logo"].label = "Update the Logo"
+        self.fields["brand_name"].label = "Logo Name"
+        self.fields["brand_name"].help_text = "This name will be visible on hover in web view."
+        self.fields["brand_name"].widget.attrs["placeholder"] = "This name will be visible on hover in web view."
+
+
+class BrandLogoAdmin(BaseAdmin):
+    form = BrandLogoAdminForm
+    list_display = ("logo_name", "logo_status", "updated_at")
+    list_filter = ("is_active",)
+    search_fields = ("brand_name",)
+    readonly_fields = ("logo_preview",)
+    fieldsets = (
+        ("Logo details", {"fields": ("logo",)}),
+        ("Brand", {"fields": ("brand_name",)}),
+        ("Display", {"fields": ("is_active", "display_order")}),
+    )
+
+    @admin.display(description="Logo Name", ordering="brand_name")
+    def logo_name(self, obj):
+        return obj.brand_name
+
+    @admin.display(description="Status", boolean=True, ordering="is_active")
+    def logo_status(self, obj):
+        return obj.is_active
+
+    @admin.display(description="Logo preview")
+    def logo_preview(self, obj):
+        return format_html('<div class="admin-image-preview"><img data-image-preview="logo" src="{}" alt="{}" {}><p data-image-empty="logo" {}>Choose a logo to preview it.</p></div>',
+                           obj.logo.url if obj and obj.logo else "", obj.brand_name if obj else "Brand logo",
+                           "" if obj and obj.logo else "hidden", "hidden" if obj and obj.logo else "")
+
+    def get_fieldsets(self, request, obj=None):
+        # Updated At is a list column, never an editable audit field.
+        return super().get_fieldsets(request, obj)
+
+    def save_model(self, request, obj, form, change):
+        if not obj.section_id:
+            obj.section = m.BrandLogoSection.objects.order_by("pk").first() or m.BrandLogoSection.objects.create()
+        obj.alt_text = obj.brand_name
+        super().save_model(request, obj, form, change)
+
+    def has_view_permission(self, request, obj=None):
+        return super().has_view_permission(request, obj) or request.user.has_perm("content_management.view_brandlogosection")
+
+    def has_add_permission(self, request):
+        return super().has_add_permission(request) or request.user.has_perm("content_management.add_brandlogosection")
+
+    def has_change_permission(self, request, obj=None):
+        return super().has_change_permission(request, obj) or request.user.has_perm("content_management.change_brandlogosection")
+
+    def has_delete_permission(self, request, obj=None):
+        return super().has_delete_permission(request, obj) or request.user.has_perm("content_management.delete_brandlogosection")
 
 
 class BrandLogoInline(TabularInline):
+    form = BrandLogoAdminForm
+    formset = BrandLogoFormSet
     model = m.BrandLogo
-    extra = 6
-    max_num = 6
-    fields = ("logo", "brand_name", "alt_text", "url", "open_in_new_tab", "display_order", "is_active")
+    extra = 0
+    min_num = 1
+    fields = ("logo", "brand_name", "display_order", "is_active")
+
+    def get_extra(self, request, obj=None, **kwargs):
+        return 1 if obj and obj.logos.exists() and request.GET.get("add_logo") else 0
+
+    def get_max_num(self, request, obj=None, **kwargs):
+        return (obj.logos.count() if obj else 0) + 1
 
     def get_formset(self, request, obj=None, **kwargs):
+        kwargs["validate_min"] = True
         kwargs["validate_max"] = True
         return super().get_formset(request, obj, **kwargs)
 
@@ -1086,9 +1713,33 @@ class BrandLogoInline(TabularInline):
 
 @admin.register(m.BrandLogoSection)
 class BrandLogoSectionAdmin(BaseAdmin):
-    list_display = ("internal_name", "heading", "is_active", "updated_at")
+    def get_model_perms(self, request):
+        return {}
+
+    hide_default_add_button = True
+    actions_list = ("add_brand_logo",)
+
+    def changelist_view(self, request, extra_context=None):
+        if not self.has_view_or_change_permission(request):
+            raise PermissionDenied
+        return redirect("admin:content_management_brandlogo_changelist")
+
+    @action(description="Add brand logo", permissions=("change",), icon="add", url_path="add-brand-logo")
+    def add_brand_logo(self, request):
+        section = self.get_queryset(request).first()
+        opts = self.model._meta
+        if section is None:
+            if not self.has_add_permission(request):
+                raise PermissionDenied
+            return redirect(reverse(f"admin:{opts.app_label}_{opts.model_name}_add"))
+        if not self.has_change_permission(request, section):
+            raise PermissionDenied
+        url = reverse(f"admin:{opts.app_label}_{opts.model_name}_change", args=(section.pk,))
+        return redirect(f"{url}?add_logo=1#logos-group")
+
+    list_display = ("internal_name", "is_active", "updated_at")
     inlines = (BrandLogoInline,)
-    fieldsets = (("Section settings", {"fields": ("internal_name", "heading", "background_color", "is_active")}),)
+    exclude = ("internal_name", "heading", "background_color", "is_active")
 
     def has_add_permission(self, request):
         return super().has_add_permission(request) and not m.BrandLogoSection.objects.exists()
@@ -1100,29 +1751,123 @@ class BrandLogoSectionAdmin(BaseAdmin):
 
 @admin.register(m.OfferBanner)
 class OfferBannerAdmin(BaseAdmin):
-    list_display = ("internal_name", "display_order", "starts_at", "ends_at", "is_active")
-    list_editable = ("display_order", "is_active")
-    list_filter = ("is_active", "starts_at", "ends_at")
+    list_display = ("internal_name", "display_order", "is_active")
+    list_editable = ("is_active",)
+    list_filter = ("is_active",)
     search_fields = ("internal_name", "alt_text", "shop_now_url")
     fieldsets = (
         ("Banner", {"fields": ("internal_name", "desktop_image", "mobile_image", "alt_text")}),
         ("Shop now link", {"fields": ("shop_now_url", "open_in_new_tab")}),
-        ("Display", {"fields": ("display_order", "starts_at", "ends_at", "is_active")}),
+        ("Display", {"fields": ("display_order", "is_active")}),
     )
+
+
+class OfferGridItemAdminForm(forms.ModelForm):
+    class Meta:
+        model = m.OfferGridItem
+        fields = (
+            "desktop_image",
+            "shop_now_url",
+        )
+        labels = {
+            "desktop_image": "Change Image",
+            "shop_now_url": "Shop Now Button URL",
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        if "desktop_image" in self.fields:
+            self.fields["desktop_image"].widget.attrs.update({
+                "accept": ".jpg,.jpeg,.png,.gif",
+                "class": "offer-grid-image-input",
+            })
+
+    def save(self, commit=True):
+        instance = super().save(commit=False)
+
+        # internal_name is required by the database model but does not need
+        # to be exposed in the simplified Offer Grid admin UI.
+        if not instance.internal_name:
+            instance.internal_name = "Offer grid item " + uuid4().hex[:8]
+
+        if commit:
+            instance.save()
+            self.save_m2m()
+
+        return instance
 
 
 class OfferGridItemInline(TabularInline):
     model = m.OfferGridItem
-    extra = 3
-    max_num = 3
-    fields = ("desktop_image", "mobile_image", "internal_name", "alt_text", "shop_now_url", "open_in_new_tab", "display_order", "is_active")
+    form = OfferGridItemAdminForm
 
-    def get_formset(self, request, obj=None, **kwargs):
-        kwargs["validate_max"] = True
-        return super().get_formset(request, obj, **kwargs)
+    extra = 1
+    min_num = 1
+    max_num = 3
+
+    readonly_fields = (
+        "image_preview",
+    )
+
+    # Requested Offer Grid fields only.
+    fields = (
+        "desktop_image",
+        "shop_now_url",
+    )
+
+    @admin.display(description="Image Preview")
+    def image_preview(self, obj):
+        image_url = ""
+
+        if obj and obj.pk and obj.desktop_image:
+            try:
+                image_url = obj.desktop_image.url
+            except Exception:
+                image_url = ""
+
+        return format_html(
+            """
+            <div class="offer-grid-preview-wrapper">
+                <img
+                    class="offer-grid-image-preview"
+                    src="{}"
+                    alt="Offer grid preview"
+                    style="
+                        display:{};
+                        max-width:180px;
+                        max-height:110px;
+                        width:auto;
+                        height:auto;
+                        object-fit:contain;
+                        border:1px solid #e5e7eb;
+                        border-radius:6px;
+                        padding:4px;
+                        background:#fff;
+                    "
+                />
+                <span
+                    class="offer-grid-preview-empty"
+                    style="display:{};color:#6b7280;"
+                >
+                    Select an image
+                </span>
+            </div>
+            """,
+            image_url,
+            "block" if image_url else "none",
+            "none" if image_url else "inline",
+        )
 
     def has_add_permission(self, request, obj=None):
-        return request.user.has_perm("content_management.change_offergridsection") or request.user.has_perm("fabriqx.change_offergridsection")
+        return (
+            request.user.has_perm(
+                "content_management.change_offergridsection"
+            )
+            or request.user.has_perm(
+                "fabriqx.change_offergridsection"
+            )
+        )
 
     def has_change_permission(self, request, obj=None):
         return self.has_add_permission(request, obj)
@@ -1133,25 +1878,53 @@ class OfferGridItemInline(TabularInline):
 
 @admin.register(m.OfferGridSection)
 class OfferGridSectionAdmin(BaseAdmin):
-    list_display = ("internal_name", "is_active", "updated_at")
-    inlines = (OfferGridItemInline,)
-    fields = ("internal_name", "is_active")
+    list_display = (
+        "internal_name",
+        "is_active",
+    )
+    inlines = (
+        OfferGridItemInline,
+    )
+    fields = (
+        "internal_name",
+        "is_active",
+    )
 
     def has_add_permission(self, request):
-        return super().has_add_permission(request) and not m.OfferGridSection.objects.exists()
+        return (
+            super().has_add_permission(request)
+            and not m.OfferGridSection.objects.exists()
+        )
 
-    def render_change_form(self, request, context, add=False, change=False, form_url="", obj=None):
+    def render_change_form(
+        self,
+        request,
+        context,
+        add=False,
+        change=False,
+        form_url="",
+        obj=None,
+    ):
         context["show_save_and_add_another"] = False
-        return super().render_change_form(request, context, add, change, form_url, obj)
+        return super().render_change_form(
+            request,
+            context,
+            add,
+            change,
+            form_url,
+            obj,
+        )
 
 
 class FooterSocialLinkInline(TabularInline):
     model = m.FooterSocialLink
-    extra = 4
-    max_num = 4
-    fields = ("icon", "platform_name", "url", "aria_label", "display_order", "is_active")
+    extra = 0
+    min_num = 1
+    max_num = 10
+    fields = ("icon", "platform_name", "url", "is_active")
 
     def get_formset(self, request, obj=None, **kwargs):
+        kwargs["validate_min"] = True
         kwargs["validate_max"] = True
         return super().get_formset(request, obj, **kwargs)
 
@@ -1169,7 +1942,7 @@ class FooterSocialLinkInline(TabularInline):
 class FooterSocialSectionAdmin(BaseAdmin):
     list_display = ("internal_name", "heading", "is_active", "updated_at")
     inlines = (FooterSocialLinkInline,)
-    fields = ("internal_name", "heading", "is_active")
+    exclude = ("internal_name", "heading", "is_active")
 
     def has_add_permission(self, request):
         return super().has_add_permission(request) and not m.FooterSocialSection.objects.exists()
@@ -1179,35 +1952,129 @@ class FooterSocialSectionAdmin(BaseAdmin):
         return super().render_change_form(request, context, add, change, form_url, obj)
 
 
+class TestimonialAdminForm(forms.ModelForm):
+    class Meta:
+        model = m.Testimonial
+        fields = "__all__"
+        labels = {
+            "customer_name": "Customer Name",
+            "image": "Customer Image",
+            "sub_text": "Sub Text",
+            "content": "Content",
+            "rating": "Rating",
+            "is_active": "Active",
+        }
+        help_texts = {
+            "image": "Optional. Allowed formats: JPG, JPEG, PNG, GIF. Maximum file size: 5 MB.",
+            "rating": "Enter a rating between 1 and 5.",
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        if "image" in self.fields:
+            self.fields["image"].required = False
+            self.fields["image"].widget.attrs.update({
+                "accept": ".jpg,.jpeg,.png,.gif",
+            })
+
+
 @admin.register(m.Testimonial)
 class TestimonialAdmin(BaseAdmin):
-    list_display = ("customer_name", "rating", "is_active")
-    list_filter = ("rating", "is_active")
-    search_fields = ("customer_name", "quote")
-    list_editable = ("is_active",)
+    form = TestimonialAdminForm
+
+    list_display = (
+        "customer_name",
+        "sub_text",
+        "rating",
+        "is_active",
+    )
+    list_filter = (
+        "rating",
+        "is_active",
+    )
+    search_fields = (
+        "customer_name",
+        "sub_text",
+        "content",
+    )
+    list_editable = (
+        "is_active",
+    )
+    fields = (
+        "customer_name",
+        "image",
+        "sub_text",
+        "content",
+        "rating",
+        "is_active",
+    )
 
 
 @admin.register(m.NewsletterSubscription)
 class NewsletterAdmin(BaseAdmin):
-    list_display = ("email", "source", "is_active", "created_at")
-    list_filter = ("is_active", "source", "created_at")
+    list_display = ("email", "is_active")
+    list_editable = ("is_active",)
+    list_filter = ("is_active",)
     search_fields = ("email",)
 
     def has_add_permission(self, request):
         return False
 
 
+class NewsletterSettingsAdminForm(forms.ModelForm):
+    class Meta:
+        model = m.NewsletterSettings
+        fields = (
+            "title",
+            "description",
+        )
+        labels = {
+            "title": "Title",
+            "description": "Content",
+        }
+        widgets = {
+            "description": WysiwygWidget,
+        }
+
+
 @admin.register(m.NewsletterSettings)
 class NewsletterSettingsAdmin(BaseAdmin):
-    list_display = ("notification_email", "notifications_enabled", "updated_at")
-    fields = ("notification_email", "notifications_enabled")
+    form = NewsletterSettingsAdminForm
+
+    list_display = (
+        "title",
+    )
+
+    fields = (
+        "title",
+        "description",
+    )
 
     def has_add_permission(self, request):
-        return super().has_add_permission(request) and not m.NewsletterSettings.objects.exists()
+        return (
+            super().has_add_permission(request)
+            and not m.NewsletterSettings.objects.exists()
+        )
 
-    def render_change_form(self, request, context, add=False, change=False, form_url="", obj=None):
+    def render_change_form(
+        self,
+        request,
+        context,
+        add=False,
+        change=False,
+        form_url="",
+        obj=None,
+    ):
         context["show_save_and_add_another"] = False
-        return super().render_change_form(request, context, add, change, form_url, obj)
+        return super().render_change_form(
+            request,
+            context,
+            add,
+            change,
+            form_url,
+            obj,
+        )
 
 
 @admin.register(m.SiteSettings)
@@ -1223,44 +2090,112 @@ class SiteSettingsAdmin(BaseAdmin):
             self.fields["commission_fixed_amount"].required = False
 
     form = SiteSettingsForm
-    fields = ("commission_type", "commission_rate", "commission_fixed_amount")
+
+    fields = (
+        "commission_type",
+        "commission_rate",
+        "commission_fixed_amount",
+    )
+
     conditional_fields = {
         "commission_rate": "commission_type == 'percentage'",
         "commission_fixed_amount": "commission_type == 'fixed'",
     }
 
     def has_add_permission(self, request):
-        return super().has_add_permission(request) and not m.SiteSettings.objects.exists()
+        return (
+            super().has_add_permission(request)
+            and not m.SiteSettings.objects.exists()
+        )
 
     def has_delete_permission(self, request, obj=None):
         return False
 
     def changelist_view(self, request, extra_context=None):
         settings_object = m.SiteSettings.load()
-        return redirect("admin:fabriqx_sitesettings_change", settings_object.pk)
+
+        return redirect(
+            "admin:fabriqx_sitesettings_change",
+            settings_object.pk,
+        )
 
     def response_change(self, request, obj):
-        return redirect("admin:fabriqx_sitesettings_change", obj.pk)
+        return redirect(
+            "admin:fabriqx_sitesettings_change",
+            obj.pk,
+        )
 
-    def render_change_form(self, request, context, add=False, change=False, form_url="", obj=None):
+    def render_change_form(
+        self,
+        request,
+        context,
+        add=False,
+        change=False,
+        form_url="",
+        obj=None,
+    ):
+        # Hide unwanted buttons on Site Settings
+        context["show_history"] = False
+        context["show_save_and_continue"] = False
         context["show_save_and_add_another"] = False
         context["show_delete"] = False
-        return super().render_change_form(request, context, add, change, form_url, obj)
+
+        return super().render_change_form(
+            request,
+            context,
+            add=add,
+            change=change,
+            form_url=form_url,
+            obj=obj,
+        )
+
+
+class PageAdminForm(forms.ModelForm):
+    class Meta:
+        model = m.Page
+        fields = (
+            "title",
+            "slug",
+            "content",
+            "is_active",
+        )
+        widgets = {
+            "content": WysiwygWidget,
+        }
+        labels = {
+            "title": "Page Title",
+            "slug": "Page URL",
+            "content": "Content",
+            "is_active": "Active",
+        }
 
 
 @admin.register(m.Page)
 class PageAdmin(BaseAdmin):
-    list_display = ("title", "slug", "is_active", "updated_at")
-    list_filter = ("is_active", "updated_at")
-    search_fields = ("title", "slug", "content", "seo_title")
-    prepopulated_fields = {"slug": ("title",)}
-    list_editable = ("is_active",)
-    fieldsets = (
-        ("Page", {"fields": ("title", "slug", "content", "is_active")}),
-        ("SEO", {"fields": ("seo_title", "seo_description")}),
-        ("Audit", {"fields": ("created_at", "updated_at"), "classes": ("collapse",)}),
+    form = PageAdminForm
+
+    list_display = (
+        "title",
+        "slug",
+        "is_active",
     )
-    readonly_fields = ("created_at", "updated_at")
+    search_fields = (
+        "title",
+        "slug",
+        "content",
+    )
+    prepopulated_fields = {
+        "slug": ("title",),
+    }
+    list_editable = (
+        "is_active",
+    )
+    fields = (
+        "title",
+        "slug",
+        "content",
+        "is_active",
+    )
 
 
 @admin.register(m.Shipment)

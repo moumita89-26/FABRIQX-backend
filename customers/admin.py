@@ -17,3 +17,4 @@ admin.site.register(WishlistItem, SimpleAdmin)
 
 # Addresses are edited inline inside Manage Customers.
 admin.site._registry[Address].hide_from_index = True
+admin.site._registry[WishlistItem].hide_from_index = True

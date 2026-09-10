@@ -28,7 +28,11 @@
             {% endif %}
 
             {% for action in actions_list %}
-                {% include "unfold/helpers/tab_action.html" with title=action.title link=action.path %}
+                {% if action.icon == "add" %}
+                    <li>{% include "unfold/helpers/header_add_button.html" with add_button_url=action.path add_button_title=action.title %}</li>
+                {% else %}
+                    {% include "unfold/helpers/tab_action.html" with title=action.title link=action.path %}
+                {% endif %}
             {% endfor %}
             {% for action in actions_detail %}
                 {% include "unfold/helpers/tab_action.html" with title=action.title link=action.path %}

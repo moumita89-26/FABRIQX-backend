@@ -159,7 +159,7 @@ def _group_roles_under_authentication(self, request, app_label=None):
         content_app["models"] = [model for model in content_app["models"] if model["object_name"] != "HomepageSection"]
         content_order = {
             "Banner": 0,
-            "BrandLogoSection": 1,
+            "BrandLogo": 1,
             "GiftSection": 2,
             "OfferBanner": 3,
             "OfferGridSection": 4,

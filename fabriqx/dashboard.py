@@ -5,7 +5,7 @@ from django.db.models import Count, Sum
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 
-from .models import CustomerProfile, InfluencerCommission, Order, Product, ProductVariant
+from .models import CustomerProfile, Order, Product
 
 
 def dashboard_callback(request, context):
@@ -52,12 +52,10 @@ def dashboard_callback(request, context):
         {"title": "Orders", "value": Order.objects.count(), "icon": "shopping_bag"},
         {"title": "Customers", "value": CustomerProfile.objects.count(), "icon": "group"},
         {"title": "Products", "value": Product.objects.count(), "icon": "inventory_2"},
-        {"title": "Pending commission", "value": InfluencerCommission.objects.filter(status=InfluencerCommission.Status.PENDING).aggregate(v=Sum("commission_amount"))["v"] or 0, "icon": "handshake"},
     ]
     context.update({
         "dashboard_cards": cards,
         "recent_orders": Order.objects.select_related("customer").order_by("-placed_at")[:8],
-        "low_stock": ProductVariant.objects.select_related("product").filter(stock_quantity__lte=5).order_by("stock_quantity")[:8],
         "sales_chart": json.dumps(sales_chart),
         "order_chart": json.dumps(order_chart),
         "chart_options": json.dumps(chart_options),

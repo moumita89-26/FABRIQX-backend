@@ -72,3 +72,10 @@ class NewsletterSettings(base.NewsletterSettings):
 class Page(base.Page):
     class Meta:
         proxy = True
+
+
+class BrandLogo(base.BrandLogo):
+    class Meta:
+        proxy = True
+        verbose_name = "Brand logo"
+        verbose_name_plural = "Brand Logo Section"
