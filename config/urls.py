@@ -63,7 +63,25 @@ def _group_roles_under_authentication(self, request, app_label=None):
     if auth_app:
         for model in auth_app["models"]:
             if model["object_name"] == "User":
-                model["name"] = "Admin & Staff Accounts"
+                model["name"] = "Admin / Staff"
+
+    # Keep account administration together at the top of the sidebar.
+    # This is a presentation-only group; the existing admin URLs and models
+    # remain unchanged.
+    customers_app = next((app for app in app_list if app["app_label"] == "customers"), None)
+    if auth_app and customers_app:
+        customer_models = customers_app["models"]
+        for model in customer_models:
+            if model["object_name"] == "CustomerProfile":
+                model["name"] = "Customers"
+        user_management = auth_app.copy()
+        user_management["app_label"] = "user_management"
+        user_management["name"] = "User Management"
+        user_management["models"] = [*auth_app["models"], *customer_models]
+        user_management["app_url"] = user_management["models"][0].get("admin_url", auth_app["app_url"])
+        app_list.remove(auth_app)
+        app_list.remove(customers_app)
+        app_list.append(user_management)
 
     # The core app contains several business domains. Present them as focused
     # navigation groups without changing their models, database tables or URLs.
@@ -82,7 +100,6 @@ def _group_roles_under_authentication(self, request, app_label=None):
             "Invoice",
             "Coupon",
             "CouponUsage",
-            "Review",
         }
         fabriqx_app["models"] = [
             model
@@ -116,16 +133,17 @@ def _group_roles_under_authentication(self, request, app_label=None):
         app_list.extend(organized_apps)
 
     app_order = {
-        "auth": 0,
+        "user_management": 0,
         "content_management": 1,
-        "customers": 2,
-        "influencers": 3,
-        "products": 4,
-        "orders": 5,
-        "finance": 6,
-        "marketing": 7,
-        "operations": 8,
-        "fabriqx": 9,
+        "customer_support": 2,
+        "customers": 3,
+        "influencers": 4,
+        "products": 5,
+        "orders": 6,
+        "finance": 7,
+        "marketing": 8,
+        "operations": 9,
+        "fabriqx": 10,
     }
     app_list.sort(key=lambda app: (app_order.get(app["app_label"], 99), app["name"].lower()))
 
@@ -148,7 +166,9 @@ def _group_roles_under_authentication(self, request, app_label=None):
             "ProductImage": 3,
             "InventoryMovement": 4,
             "InventoryReport": 5,
-            "Coupon": 6,
+            "ProductFAQ": 6,
+            "Review": 7,
+            "Coupon": 8,
         }
         products_app["models"].sort(
             key=lambda model: (product_order.get(model["object_name"], 99), model["name"])
@@ -156,21 +176,47 @@ def _group_roles_under_authentication(self, request, app_label=None):
 
     content_app = next((app for app in app_list if app["app_label"] == "content_management"), None)
     if content_app:
-        content_app["models"] = [model for model in content_app["models"] if model["object_name"] != "HomepageSection"]
+        content_app["name"] = "CMS"
+        contact_models = [
+            model for model in content_app["models"]
+            if model["object_name"] == "ContactSubmission"
+        ]
+        content_app["models"] = [
+            model for model in content_app["models"]
+            if model["object_name"] != "ContactSubmission"
+        ]
+        if contact_models:
+            customer_support = content_app.copy()
+            customer_support["app_label"] = "customer_support"
+            customer_support["name"] = "Customer Support"
+            customer_support["models"] = contact_models
+            customer_support["app_url"] = contact_models[0].get("admin_url", content_app["app_url"])
+            app_list.append(customer_support)
         content_order = {
             "Banner": 0,
-            "BrandLogo": 1,
-            "GiftSection": 2,
+            "HomepageSection": 1,
+            "BrandLogo": 2,
             "OfferBanner": 3,
-            "OfferGridSection": 4,
-            "Testimonial": 5,
-            "FooterSocialSection": 6,
-            "Page": 7,
+            "OfferGridItem": 4,
+            "GiftSection": 5,
+            "Testimonial": 6,
+            "FooterSocialSection": 7,
             "NewsletterSettings": 8,
             "NewsletterSubscription": 9,
+            "Page": 10,
         }
         content_app["models"].sort(
             key=lambda model: (content_order.get(model["object_name"], 99), model["name"])
+        )
+
+    # Customer Support is created from the CMS app above, so sort again after
+    # all presentation-only groups have been assembled.
+    app_list.sort(key=lambda app: (app_order.get(app["app_label"], 99), app["name"].lower()))
+
+    for app in app_list:
+        app["is_active_menu"] = any(
+            model.get("admin_url") and model["admin_url"] in request.path
+            for model in app.get("models", [])
         )
 
     if app_label == "fabriqx":

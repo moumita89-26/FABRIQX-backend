@@ -8,11 +8,12 @@ document.addEventListener("DOMContentLoaded", function () {
             "image/jpeg",
             "image/png",
             "image/gif",
+            "image/webp",
         ];
 
         if (!allowedTypes.includes(file.type)) {
             alert(
-                "Please select a JPG, JPEG, PNG or GIF image."
+                "Please select a JPG, JPEG, PNG, GIF or WEBP image."
             );
 
             return false;

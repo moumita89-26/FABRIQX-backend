@@ -2,8 +2,11 @@
 {% load static %}
 {% block extrahead %}
     {{ block.super }}
-    <link rel="stylesheet" href="{% static 'fabriqx/admin/css/custom_admin.css' %}">
-    <script src="{% static 'fabriqx/js/admin-ui.js' %}" defer></script>
+    <link rel="stylesheet" href="{% static 'fabriqx/admin/css/custom_admin.css' %}?v=report-filter-layout-1">
+    <script src="{% static 'fabriqx/js/admin-ui.js' %}?v=sidebar-tooltips-4" defer></script>
+    <script src="{% static 'fabriqx/admin/js/banner_preview.js' %}?v=webp-preview-2" defer></script>
+    <script src="{% static 'fabriqx/js/sidebar-toggle.js' %}?v=menu-toggle-1" defer></script>
+    <script src="{% static 'fabriqx/js/password-toggle.js' %}" defer></script>
     <script src="{% static 'fabriqx/js/delete-dialog.js' %}" defer></script>
     <style>
         .fabriqx-delete-dialog { border: 0; border-radius: 12px; padding: 24px; width: min(420px, calc(100% - 32px)); margin: auto; color: inherit; background: var(--color-base-50, white); }

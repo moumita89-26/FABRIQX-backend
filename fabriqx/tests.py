@@ -4,9 +4,11 @@ import hashlib
 import hmac
 import json
 import tempfile
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
+from io import StringIO
 
 from django.conf import settings
 from django.contrib import admin
@@ -17,11 +19,13 @@ from django.test import Client, TestCase, override_settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.files.base import ContentFile
 from django.core import mail
+from django.core.management import call_command
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
+from openpyxl import load_workbook
 
-from .models import Banner, BrandLogo, BrandLogoSection, Category, Coupon, CustomerProfile, FooterSocialLink, FooterSocialSection, GiftSection, GiftSectionFeature, GiftSectionStatistic, InfluencerCommission, InfluencerProfile, InventoryMovement, Invoice, NewsletterSettings, NewsletterSubscription, OfferBanner, OfferGridItem, OfferGridSection, Order, OrderItem, Page, Payment, Product, ProductVariant, SiteSettings, Testimonial, UserRole
+from .models import Banner, BrandLogo, BrandLogoSection, Category, ContactSubmission, Coupon, CustomerProfile, FooterSocialLink, FooterSocialSection, GiftSection, GiftSectionFeature, GiftSectionStatistic, InfluencerCommission, InfluencerProfile, InventoryMovement, Invoice, NewsletterSettings, NewsletterSubscription, OfferBanner, OfferGridItem, OfferGridSection, Order, OrderItem, Page, Payment, Product, ProductVariant, SiteSettings, Testimonial, UserRole, validate_icon_file
 
 
 class ModelTests(TestCase):
@@ -33,13 +37,34 @@ class ModelTests(TestCase):
             for extension, image_format in (("jpg", "JPEG"), ("jpeg", "JPEG"), ("PNG", "PNG"), ("gif", "GIF"), ("webp", "WEBP"), ("bmp", "BMP"), ("jpg", "BMP")):
                 with self.subTest(model=model.__name__, extension=extension, image_format=image_format):
                     stream = BytesIO()
-                    Image.new("RGB", (2, 2)).save(stream, format=image_format)
+                    dimensions = (1920, 890) if model is Banner else (2, 2)
+                    Image.new("RGB", dimensions).save(stream, format=image_format)
                     upload = SimpleUploadedFile(f"image.{extension}", stream.getvalue())
-                    if image_format in {"JPEG", "PNG", "GIF"}:
+                    if image_format in {"JPEG", "PNG", "GIF", "WEBP"}:
                         field.clean(upload, model())
                     else:
                         with self.assertRaises(ValidationError):
                             field.clean(upload, model())
+
+    def test_hero_banner_is_center_cropped_and_resized_to_required_dimensions(self):
+        from PIL import Image
+
+        stream = BytesIO()
+        Image.new("RGB", (1418, 1101)).save(stream, format="WEBP")
+        upload = SimpleUploadedFile("incorrect-hero.webp", stream.getvalue(), content_type="image/webp")
+
+        with tempfile.TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
+            banner = Banner.objects.create(title="Processed hero", image=upload)
+            with Image.open(banner.image.path) as processed:
+                self.assertEqual(processed.size, (1920, 890))
+
+    def test_icon_upload_allows_safe_svg_and_rejects_scripted_svg(self):
+        safe_svg = SimpleUploadedFile("icon.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>')
+        validate_icon_file(safe_svg)
+
+        unsafe_svg = SimpleUploadedFile("unsafe.svg", b"<svg><script>alert(1)</script></svg>")
+        with self.assertRaises(ValidationError):
+            validate_icon_file(unsafe_svg)
 
 
     def setUp(self):
@@ -54,6 +79,15 @@ class ModelTests(TestCase):
         self.assertEqual(self.product.total_stock, 4)
         self.assertEqual(self.variant.effective_price, Decimal("1500.00"))
         self.assertEqual(self.variant.stock_status, "Low stock")
+
+    def test_homepage_gift_seed_creates_complete_active_campaign(self):
+        call_command("seed_homepage_gift", stdout=StringIO())
+
+        gift = GiftSection.objects.get(internal_name="Shop More, Get More Joy!")
+        self.assertTrue(gift.is_active)
+        self.assertEqual(gift.main_image.name, "gift-sections/main/about-img.webp")
+        self.assertEqual(gift.features.filter(is_active=True).count(), 5)
+        self.assertEqual(gift.statistics.filter(is_active=True).count(), 3)
 
     def test_application_timestamps_use_configured_local_timezone(self):
         utc_value = datetime(2026, 9, 4, 5, 30, tzinfo=datetime_timezone.utc)
@@ -106,15 +140,21 @@ class ModelTests(TestCase):
             offer.full_clean()
 
     def test_testimonial_rejects_numeric_customer_name(self):
-        testimonial = Testimonial(customer_name="123.45", quote="Excellent", rating=5)
+        testimonial = Testimonial(customer_name="123.45", content="Excellent", rating=5)
 
-        with self.assertRaisesMessage(ValidationError, "Customer name cannot contain only a numeric value."):
+        with self.assertRaisesMessage(ValidationError, "Customer name may contain alphabetic characters and spaces only."):
+            testimonial.full_clean()
+
+    def test_testimonial_rejects_special_characters_in_customer_name(self):
+        testimonial = Testimonial(customer_name="Jane@Doe", content="Excellent", rating=5)
+
+        with self.assertRaisesMessage(ValidationError, "Customer name may contain alphabetic characters and spaces only."):
             testimonial.full_clean()
 
     def test_testimonial_rating_uses_consistent_minimum_validation(self):
         for invalid_rating in (-1, 0):
             with self.subTest(rating=invalid_rating):
-                testimonial = Testimonial(customer_name="Customer", quote="Excellent", rating=invalid_rating)
+                testimonial = Testimonial(customer_name="Customer", content="Excellent", rating=invalid_rating)
                 with self.assertRaisesMessage(ValidationError, "Ensure this value is greater than or equal to 1."):
                     testimonial.full_clean()
 
@@ -239,6 +279,9 @@ class AdminTests(TestCase):
         self.assertIn("password1", response.context["adminform"].form.errors)
         self.assertIn("password2", response.context["adminform"].form.errors)
         data.update(password1="UniquePass123!", password2="UniquePass123!")
+        data["permissions"] = [
+            Permission.objects.get(content_type__app_label="content_management", codename="view_banner").pk
+        ]
         self.assertEqual(self.client.post(url, data).status_code, 302)
         user = get_user_model().objects.get(email="jane@example.com")
         self.assertEqual(user.get_full_name(), "Jane Doe")
@@ -408,10 +451,12 @@ class AdminTests(TestCase):
         self.assertIn("dashboard_cards", response.context)
         self.assertEqual(response.context["dashboard_cards"][0]["title"], "Today's sales")
         self.assertContains(response, "Today&#x27;s sales")
+        self.assertContains(response, "Sample dashboard data")
         self.assertContains(response, "Sales — last 7 days")
         self.assertContains(response, 'data-type="line"', html=False)
         self.assertContains(response, 'data-type="bar"', html=False)
         self.assertContains(response, "FABRIQX Administration")
+        self.assertContains(response, 'href="/static/branding/favicon.png"', html=False)
         app_models = {app["app_label"]: {model["object_name"] for model in app["models"]} for app in response.context["app_list"]}
         self.assertIn("Product", app_models["products"])
         self.assertIn("Coupon", app_models["products"])
@@ -420,7 +465,7 @@ class AdminTests(TestCase):
         product_models = next(app["models"] for app in response.context["app_list"] if app["app_label"] == "products")
         self.assertEqual(
             [model["object_name"] for model in product_models],
-            ["Product", "Category", "InventoryMovement", "InventoryReport", "Coupon"],
+            ["Product", "Category", "InventoryMovement", "InventoryReport", "ProductFAQ", "Review", "Coupon"],
         )
         self.assertIn("InfluencerProfile", app_models["influencers"])
         self.assertNotIn("InfluencerCommission", app_models["influencers"])
@@ -430,25 +475,23 @@ class AdminTests(TestCase):
         self.assertEqual([model["object_name"] for model in influencer_models], ["InfluencerProfile", "InfluencerReport"])
         self.assertEqual(
             app_models["content_management"],
-            {"Banner", "BrandLogo", "FooterSocialSection", "GiftSection", "NewsletterSettings", "NewsletterSubscription", "OfferBanner", "OfferGridSection", "Page", "Testimonial"},
+            {"Banner", "BrandLogo", "FooterSocialSection", "GiftSection", "HomepageSection", "NewsletterSettings", "NewsletterSubscription", "OfferBanner", "OfferGridItem", "Page", "Testimonial"},
         )
         content_models = next(app["models"] for app in response.context["app_list"] if app["app_label"] == "content_management")
         self.assertEqual(
             [model["name"] for model in content_models],
-            ["Hero banners", "Brand Logo Section", "Homepage gift sections", "Offer banners", "Offer grid", "Testimonials", "Footer social links", "Pages", "Newsletter settings", "Newsletter subscriptions"],
+            ["Hero banners", "Homepage section settings", "Brand logos", "Offer banners", "Offer grid", "Homepage gift sections", "Testimonials", "Footer social links", "Newsletter settings", "Newsletter subscriptions", "Pages"],
         )
-        self.assertNotIn("HomepageSection", app_models["content_management"])
-        self.assertIn("CustomerProfile", app_models["customers"])
-        self.assertNotIn("Address", app_models["customers"])
-        self.assertNotIn("WishlistItem", app_models["customers"])
+        self.assertIn("HomepageSection", app_models["content_management"])
+        self.assertEqual(app_models["user_management"], {"User", "CustomerProfile"})
         self.assertNotIn("orders", app_models)
         self.assertNotIn("finance", app_models)
         self.assertNotIn("marketing", app_models)
         self.assertNotIn("operations", app_models)
         self.assertNotIn("AuditLog", {name for models in app_models.values() for name in models})
-        self.assertNotIn("UserRole", app_models["auth"])
+        self.assertNotIn("UserRole", app_models["user_management"])
         labels = [app["app_label"] for app in response.context["app_list"]]
-        self.assertEqual(labels.index("influencers"), labels.index("customers") + 1)
+        self.assertEqual(labels.index("user_management"), 0)
         self.assertContains(response, 'aria-label="Open account menu"', html=False)
         self.assertContains(response, 'min-width: 19rem', html=False)
         self.assertNotContains(response, '<aside class="shrink-0 lg:w-96">', html=False)
@@ -554,6 +597,9 @@ class AdminTests(TestCase):
         self.assertFalse(get_user_model().objects.filter(username="duplicate_email_admin").exists())
 
     def test_new_admin_account_receives_access_email(self):
+        view_banner = Permission.objects.get(
+            content_type__app_label="content_management", codename="view_banner"
+        )
         with self.captureOnCommitCallbacks(execute=True):
             response = self.client.post(
                 reverse("admin:auth_user_add"),
@@ -562,7 +608,7 @@ class AdminTests(TestCase):
                     "email": "emailed-admin@example.com",
                     "password1": "TemporaryPass123!",
                     "password2": "TemporaryPass123!",
-                    "permissions": [],
+                    "permissions": [view_banner.pk],
                     "_save": "Save",
                 },
                 HTTP_HOST="127.0.0.1",
@@ -658,7 +704,7 @@ class AdminTests(TestCase):
         self.assertContains(list_page, reverse("admin:auth_user_change", args=(staff.pk,)))
         self.assertContains(list_page, reverse("admin:auth_user_change", args=(self.admin_user.pk,)))
 
-    def test_customer_list_allows_edit_without_user_dropdown(self):
+    def test_customer_list_allows_view_and_delete_without_edit(self):
         customer = CustomerProfile.objects.create(
             user=get_user_model().objects.create_user("editable_customer", email="customer@example.com", first_name="Customer"),
             phone="1234567890",
@@ -668,12 +714,10 @@ class AdminTests(TestCase):
             HTTP_HOST="127.0.0.1",
         )
         self.assertEqual(response.status_code, 200)
-        self.assertNotContains(
-            response,
-            reverse("admin:customers_customerprofile_delete", args=(customer.pk,)),
-        )
-        self.assertNotContains(response, ">Delete</a>", html=False)
-        self.assertContains(response, ">Edit</a>", html=False)
+        self.assertContains(response, reverse("admin:customers_customerprofile_delete", args=(customer.pk,)))
+        self.assertContains(response, ">Delete</a>", html=False)
+        self.assertContains(response, ">View</a>", html=False)
+        self.assertNotContains(response, ">Edit</a>", html=False)
         self.assertContains(response, reverse("admin:customers_customerprofile_change", args=(customer.pk,)))
 
         change_page = self.client.get(
@@ -683,6 +727,20 @@ class AdminTests(TestCase):
         self.assertEqual(change_page.status_code, 200)
         self.assertNotContains(change_page, 'name="user"', html=False)
         self.assertTrue(change_page.context["adminform"].form.fields["username"].disabled)
+
+    def test_deleting_customer_also_deletes_the_auth_user(self):
+        user = get_user_model().objects.create_user("removed_customer", email="removed@example.com")
+        customer = CustomerProfile.objects.create(user=user, phone="1234567890")
+
+        response = self.client.post(
+            reverse("admin:customers_customerprofile_delete", args=(customer.pk,)),
+            {"post": "yes"},
+            HTTP_HOST="127.0.0.1",
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(CustomerProfile.objects.filter(pk=customer.pk).exists())
+        self.assertFalse(get_user_model().objects.filter(pk=user.pk).exists())
 
     def test_customer_cannot_be_updated_with_empty_mandatory_fields(self):
         user = get_user_model().objects.create_user(
@@ -760,6 +818,21 @@ class AdminTests(TestCase):
         self.assertContains(response, "category-drag-handle")
         self.assertContains(response, "fabriqx/admin/category_sort.js")
 
+    def test_category_active_status_can_be_toggled_from_list(self):
+        category = Category.objects.create(name="Toggle category", is_active=True)
+
+        response = self.client.post(
+            reverse("admin:products_category_toggle_active", args=(category.pk,)),
+            data=json.dumps({"is_active": False}),
+            content_type="application/json",
+            HTTP_HOST="127.0.0.1",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"success": True, "id": category.pk, "is_active": False})
+        category.refresh_from_db()
+        self.assertFalse(category.is_active)
+
     def test_category_admin_regenerates_slug_and_allows_deletion(self):
         add_response = self.client.post(
             reverse("admin:products_category_add"),
@@ -801,6 +874,24 @@ class AdminTests(TestCase):
         self.assertEqual(delete_response.status_code, 302)
         self.assertFalse(Category.objects.filter(pk=category.pk).exists())
 
+    def test_category_admin_can_add_a_subcategory(self):
+        parent = Category.objects.create(name="Parent category")
+
+        response = self.client.post(
+            reverse("admin:products_category_add"),
+            {
+                "name": "New subcategory",
+                "parent": parent.pk,
+                "is_active": "on",
+                "_save": "Save",
+            },
+            HTTP_HOST="127.0.0.1",
+        )
+
+        self.assertEqual(response.status_code, 302)
+        subcategory = Category.objects.get(name="New subcategory")
+        self.assertEqual(subcategory.parent, parent)
+
     def test_product_requires_at_least_one_variant_with_sku(self):
         category = Category.objects.create(name="Product category")
         add_url = reverse("admin:products_product_add")
@@ -838,16 +929,49 @@ class AdminTests(TestCase):
         self.assertContains(response, "This field is required.")
         self.assertFalse(Product.objects.filter(name="Product without SKU").exists())
 
-    def test_empty_inventory_movement_shows_validation_instead_of_crashing(self):
-        response = self.client.post(
+    def test_inventory_movements_are_read_only(self):
+        from django.test import RequestFactory
+
+        admin_instance = admin.site._registry[InventoryMovement]
+        request = RequestFactory().get("/")
+        request.user = self.admin_user
+        self.assertFalse(admin_instance.has_add_permission(request))
+        self.assertFalse(admin_instance.has_change_permission(request, InventoryMovement()))
+        self.assertFalse(admin_instance.has_delete_permission(request, InventoryMovement()))
+
+        response = self.client.get(
             reverse("admin:products_inventorymovement_add"),
-            {"_save": "Save"},
             HTTP_HOST="127.0.0.1",
         )
+        self.assertEqual(response.status_code, 403)
 
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "This field is required.")
-        self.assertEqual(InventoryMovement.objects.count(), 0)
+    def test_admin_bulk_exports_are_not_available(self):
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        request.user = self.admin_user
+        actions = admin.site._registry[InventoryMovement].get_actions(request)
+        self.assertNotIn("export_csv", actions)
+        self.assertNotIn("export_excel", actions)
+
+    def test_influencer_report_shows_static_sample_data(self):
+        reports = (
+            ("admin:influencers_influencerreport_changelist", "INF-A7K-2Q91", "Ananya Krishnan", False),
+            ("admin:products_inventoryreport_changelist", "RYE-SAREE-01", "Royal Teal Embroidered Saree", True),
+            ("admin:fabriqx_salesreport_changelist", "ORD-2026-1048", "Aarav Sharma", True),
+        )
+        for url_name, identifier, label, has_chart in reports:
+            with self.subTest(report=url_name):
+                response = self.client.get(reverse(url_name), HTTP_HOST="127.0.0.1")
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, "Static sample data")
+                self.assertContains(response, identifier)
+                self.assertContains(response, label)
+                if has_chart:
+                    self.assertContains(response, 'data-type="bar"', html=False)
+                else:
+                    self.assertNotContains(response, 'data-type="bar"', html=False)
+                    self.assertContains(response, "Commission outstanding")
 
     def test_empty_coupon_shows_validation_instead_of_crashing(self):
         response = self.client.post(
@@ -884,6 +1008,34 @@ class AdminTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Start date cannot be earlier than today.")
         self.assertFalse(Coupon.objects.filter(code="PAST-COUPON").exists())
+
+    def test_coupon_admin_validates_negative_edge_case_values(self):
+        starts_at = timezone.localtime(timezone.now())
+        expires_at = timezone.localtime(timezone.now() + timezone.timedelta(days=1))
+        response = self.client.post(
+            reverse("admin:products_coupon_add"),
+            {
+                "code": "EDGE",
+                "discount_type": Coupon.DiscountType.FIXED,
+                "discount_value": "10.00",
+                "minimum_order_value": "-1.00",
+                "maximum_discount": "-5.00",
+                "starts_at_0": starts_at.strftime("%Y-%m-%d"),
+                "starts_at_1": starts_at.strftime("%H:%M:%S"),
+                "expires_at_0": expires_at.strftime("%Y-%m-%d"),
+                "expires_at_1": expires_at.strftime("%H:%M:%S"),
+                "per_customer_limit": "0",
+                "is_active": "on",
+                "_save": "Save",
+            },
+            HTTP_HOST="127.0.0.1",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Minimum order value cannot be negative.")
+        self.assertContains(response, "Maximum discount cannot be negative.")
+        self.assertContains(response, "Per-customer limit must be at least 1.")
+        self.assertFalse(Coupon.objects.filter(code="EDGE").exists())
 
     def test_categories_can_be_reordered_by_drag_and_drop_endpoint(self):
         first = Category.objects.create(name="First category", display_order=0)
@@ -1009,6 +1161,25 @@ class AdminTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "<trix-editor", html=False)
         self.assertContains(response, "unfold/forms/js/trix/trix.js", html=False)
+
+    def test_contact_submissions_have_view_and_delete_actions_without_subject(self):
+        submission = ContactSubmission.objects.create(
+            name="Asha Patel",
+            email="asha@example.com",
+            phone="9876543210",
+            subject="Order question",
+            message="Could you help me?",
+        )
+
+        response = self.client.get(reverse("admin:content_management_contactsubmission_changelist"), HTTP_HOST="127.0.0.1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Subject")
+        self.assertNotContains(response, "Order question")
+        self.assertContains(response, reverse("admin:content_management_contactsubmission_change", args=(submission.pk,)))
+        self.assertContains(response, reverse("admin:content_management_contactsubmission_delete", args=(submission.pk,)))
+        self.assertContains(response, ">View</a>", html=False)
+        self.assertContains(response, ">Delete</a>", html=False)
 
     def test_homepage_section_has_rich_text_editor(self):
         response = self.client.get(reverse("admin:content_management_homepagesection_add"), HTTP_HOST="127.0.0.1")
@@ -1208,54 +1379,72 @@ class AdminTests(TestCase):
         self.assertFalse(BrandLogo.objects.filter(pk=logos[0].pk).exists())
         self.assertEqual(section.logos.count(), 5)
 
-    def test_offer_grid_allows_up_to_three_items_and_is_singleton(self):
-        add_url = reverse("admin:content_management_offergridsection_add")
+    def test_offer_grid_lists_each_offer_tile_separately(self):
+        grid = OfferGridSection.objects.create()
+        OfferGridItem.objects.create(
+            section=grid,
+            internal_name="Homepage offer 1",
+            desktop_image="offers/grid-1.jpg",
+            shop_now_url="/products/",
+            display_order=1,
+        )
+        OfferGridItem.objects.create(
+            section=grid,
+            internal_name="Homepage offer 2",
+            desktop_image="offers/grid-2.jpg",
+            shop_now_url="/sale/",
+            display_order=2,
+        )
+        add_url = reverse("admin:content_management_offergriditem_add")
         response = self.client.get(add_url, HTTP_HOST="127.0.0.1")
-        self.assertContains(response, 'name="items-0-shop_now_url"', html=False)
-        self.assertNotContains(response, 'name="items-3-shop_now_url"', html=False)
-        item_formset = response.context["inline_admin_formsets"][0].formset
-        self.assertEqual((item_formset.min_num, item_formset.max_num), (1, 3))
-        OfferGridSection.objects.create()
-        self.assertEqual(self.client.get(add_url, HTTP_HOST="127.0.0.1").status_code, 403)
-
-    def test_offer_grid_rejects_empty_mandatory_item_fields(self):
-        response = self.client.post(
-            reverse("admin:content_management_offergridsection_add"),
-            {
-                "internal_name": "Homepage offer grid",
-                "is_active": "on",
-                "items-TOTAL_FORMS": "3",
-                "items-INITIAL_FORMS": "0",
-                "items-MIN_NUM_FORMS": "3",
-                "items-MAX_NUM_FORMS": "3",
-                "_save": "Save",
-            },
+        self.assertContains(response, 'name="internal_name"', html=False)
+        self.assertContains(response, 'name="shop_now_url"', html=False)
+        self.assertNotContains(response, 'name="display_order"', html=False)
+        self.assertNotContains(response, 'name="items-0-shop_now_url"', html=False)
+        listing = self.client.get(
+            reverse("admin:content_management_offergriditem_changelist"),
             HTTP_HOST="127.0.0.1",
         )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "This field is required.")
-        self.assertFalse(OfferGridSection.objects.exists())
+        self.assertContains(listing, "Homepage offer 1")
+        self.assertContains(listing, "Homepage offer 2")
+        self.assertNotContains(listing, ">Display order<", html=False)
 
     def test_footer_social_editor_supports_dynamic_links_and_is_singleton(self):
         add_url = reverse("admin:content_management_footersocialsection_add")
         response = self.client.get(add_url, HTTP_HOST="127.0.0.1")
         self.assertContains(response, 'name="links-0-url"', html=False)
-        self.assertNotContains(response, 'name="links-1-url"', html=False)
-        self.assertContains(response, 'name="links-MAX_NUM_FORMS" value="10"', html=False)
+        self.assertContains(response, 'name="links-3-url"', html=False)
+        self.assertNotContains(response, 'name="links-4-url"', html=False)
+        self.assertContains(response, 'name="links-MAX_NUM_FORMS" value="4"', html=False)
         link_formset = response.context["inline_admin_formsets"][0].formset
-        self.assertEqual((link_formset.min_num, link_formset.max_num), (1, 10))
+        self.assertEqual((link_formset.min_num, link_formset.max_num), (4, 4))
         FooterSocialSection.objects.create()
         self.assertEqual(self.client.get(add_url, HTTP_HOST="127.0.0.1").status_code, 403)
+
+    def test_footer_social_editor_has_no_uploaded_icon_currently_label(self):
+        section = FooterSocialSection.objects.create()
+        FooterSocialLink.objects.create(section=section, platform_name="facebook", url="https://facebook.com", display_order=0)
+        FooterSocialLink.objects.create(section=section, platform_name="x", url="https://x.com", display_order=1)
+        FooterSocialLink.objects.create(section=section, platform_name="linkedin", url="https://linkedin.com", display_order=2)
+        FooterSocialLink.objects.create(section=section, platform_name="instagram", url="https://instagram.com", display_order=3)
+
+        response = self.client.get(
+            reverse("admin:content_management_footersocialsection_change", args=(section.pk,)),
+            HTTP_HOST="127.0.0.1",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Currently:")
+        self.assertNotContains(response, 'name="links-0-icon"', html=False)
 
     def test_footer_social_section_rejects_empty_mandatory_link_fields(self):
         response = self.client.post(
             reverse("admin:content_management_footersocialsection_add"),
             {
-                "links-TOTAL_FORMS": "1",
+                "links-TOTAL_FORMS": "4",
                 "links-INITIAL_FORMS": "0",
-                "links-MIN_NUM_FORMS": "1",
-                "links-MAX_NUM_FORMS": "10",
+                "links-MIN_NUM_FORMS": "4",
+                "links-MAX_NUM_FORMS": "4",
                 "_save": "Save",
             },
             HTTP_HOST="127.0.0.1",
@@ -1397,6 +1586,7 @@ class AdminTests(TestCase):
         response = self.client.get(change_url, HTTP_HOST="127.0.0.1")
         self.assertContains(response, "commission_type == &#x27;percentage&#x27;")
         self.assertContains(response, "commission_type == &#x27;fixed&#x27;")
+        self.assertContains(response, "lg:grid-cols-2")
         self.assertNotContains(response, "Back to list")
 
         response = self.client.post(change_url, {
@@ -1435,48 +1625,53 @@ class AdminTests(TestCase):
         sample = self.client.get(reverse("admin:products_product_download_product_sample"), HTTP_HOST="127.0.0.1")
         self.assertEqual(sample.status_code, 200)
         self.assertIn("spreadsheetml", sample["Content-Type"])
+        workbook = load_workbook(BytesIO(sample.content), read_only=True)
+        self.assertEqual(
+            tuple(cell.value for cell in next(workbook["Products"].iter_rows())),
+            (
+                "category", "product_name", "brand", "short_description", "description",
+                "regular_price", "sale_price", "sale", "is_new_arrival", "sku", "size",
+                "color", "color_code", "stock_quantity",
+            ),
+        )
 
-        with tempfile.TemporaryDirectory() as media_root:
-            image = Path(media_root) / "products/import/dress.jpg"
-            image.parent.mkdir(parents=True)
-            image.write_bytes(b"sample-image")
-            csv_data = (
-                "category,category_audience,product_name,slug,description,regular_price,status,sku,size,color,stock_quantity,image_path,is_primary_image\n"
-                "Dresses,women,Imported Dress,imported-dress,Imported product,1999.00,active,IMPORT-M-RED,M,Red,20,products/import/dress.jpg,true\n"
-            ).encode()
-            upload = SimpleUploadedFile("products.csv", csv_data, content_type="text/csv")
-            with override_settings(MEDIA_ROOT=Path(media_root)):
-                response = self.client.post(reverse("admin:products_product_import_products"), {"import_file": upload}, HTTP_HOST="127.0.0.1")
-            self.assertEqual(response.status_code, 302)
-            product = Product.objects.get(slug="imported-dress")
-            self.assertEqual(product.variants.get().stock_quantity, 20)
-            self.assertEqual(product.images.get().image.name, "products/import/dress.jpg")
-
-    def test_product_import_accepts_public_image_url(self):
         csv_data = (
-            "category,product_name,slug,description,regular_price,status,sku,stock_quantity,image_url,is_primary_image\n"
-            "Dresses,Remote Image Dress,remote-image-dress,Imported product,1499.00,active,REMOTE-M,10,https://cdn.example.com/dress.jpg,true\n"
+            "category,product_name,description,regular_price,sale,sku,size,color,stock_quantity\n"
+            "Dresses,Imported Dress,Imported product,1999.00,true,IMPORT-M-RED,M,Red,20\n"
         ).encode()
         upload = SimpleUploadedFile("products.csv", csv_data, content_type="text/csv")
-        with tempfile.TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=Path(media_root)):
-            with patch("fabriqx.product_import._download_image", return_value=("remote-image-dress.jpg", ContentFile(b"image-bytes"))):
-                response = self.client.post(reverse("admin:products_product_import_products"), {"import_file": upload}, HTTP_HOST="127.0.0.1")
+        response = self.client.post(reverse("admin:products_product_import_products"), {"import_file": upload}, HTTP_HOST="127.0.0.1")
+        self.assertEqual(response.status_code, 302)
+        product = Product.objects.get(slug="imported-dress")
+        self.assertTrue(product.is_trending)
+        self.assertEqual(product.variants.get().stock_quantity, 20)
+
+    def test_product_import_ignores_removed_image_url_column(self):
+        csv_data = (
+            "category,product_name,description,regular_price,sku,stock_quantity,image_url\n"
+            "Dresses,Remote Image Dress,Imported product,1499.00,REMOTE-M,10,https://cdn.example.com/dress.jpg\n"
+        ).encode()
+        upload = SimpleUploadedFile("products.csv", csv_data, content_type="text/csv")
+        response = self.client.post(reverse("admin:products_product_import_products"), {"import_file": upload}, HTTP_HOST="127.0.0.1")
         self.assertEqual(response.status_code, 302)
         product = Product.objects.get(slug="remote-image-dress")
-        self.assertTrue(product.images.exists())
-        self.assertNotEqual(product.images.get().image.name, "remote-image-dress.jpg")
+        self.assertFalse(product.images.exists())
 
-    def test_product_import_treats_url_in_image_path_as_remote_image(self):
+    def test_product_import_ignores_removed_columns(self):
         csv_data = (
-            "category,product_name,regular_price,sku,image_path\n"
-            "Dresses,Remote Path Dress,1499.00,REMOTE-PATH,https://cdn.example.com/dress.jpg\n"
+            "category,category_audience,product_name,slug,regular_price,status,is_featured,sku,price_override,stock_quantity,low_stock_threshold,image_path,image_alt,is_primary_image\n"
+            "Dresses,kids,Removed Fields Dress,custom-slug,1499.00,active,true,REMOVED-FIELDS,99.00,10,1,https://cdn.example.com/dress.jpg,Custom alt,true\n"
         ).encode()
         upload = SimpleUploadedFile("products.csv", csv_data, content_type="text/csv")
-        with tempfile.TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=Path(media_root)):
-            with patch("fabriqx.product_import._download_image", return_value=("remote-path-dress.jpg", ContentFile(b"image-bytes"))) as download:
-                response = self.client.post(reverse("admin:products_product_import_products"), {"import_file": upload}, HTTP_HOST="127.0.0.1")
+        response = self.client.post(reverse("admin:products_product_import_products"), {"import_file": upload}, HTTP_HOST="127.0.0.1")
         self.assertEqual(response.status_code, 302)
-        download.assert_called_once_with("https://cdn.example.com/dress.jpg", "remote-path-dress")
+        product = Product.objects.get(slug="removed-fields-dress")
+        variant = product.variants.get()
+        self.assertEqual(product.status, Product.Status.DRAFT)
+        self.assertFalse(product.is_featured)
+        self.assertIsNone(variant.price_override)
+        self.assertEqual(variant.low_stock_threshold, 5)
+        self.assertFalse(product.images.exists())
 
     def test_product_import_allows_new_product_without_image(self):
         csv_data = (
@@ -1492,6 +1687,26 @@ class AdminTests(TestCase):
         self.assertEqual(response.status_code, 302)
         product = Product.objects.get(slug="image-optional-dress")
         self.assertFalse(product.images.exists())
+
+    def test_product_import_reports_each_invalid_product_without_success_claim(self):
+        csv_data = (
+            "category,product_name,regular_price,sku,stock_quantity\n"
+            "Dresses,Valid import,1499.00,VALID-IMPORT,10\n"
+            "Dresses,Broken import,not-a-price,BROKEN-IMPORT,10\n"
+        ).encode()
+        upload = SimpleUploadedFile("products.csv", csv_data, content_type="text/csv")
+        response = self.client.post(
+            reverse("admin:products_product_import_products"),
+            {"import_file": upload},
+            HTTP_HOST="127.0.0.1",
+            follow=True,
+        )
+
+        self.assertContains(response, "1 succeeded")
+        self.assertContains(response, "1 rows failed")
+        self.assertContains(response, "Broken import / BROKEN-IMPORT")
+        self.assertTrue(Product.objects.filter(slug="valid-import").exists())
+        self.assertFalse(Product.objects.filter(slug="broken-import").exists())
 
 
 class CustomerApiTests(TestCase):
@@ -1511,17 +1726,157 @@ class CustomerApiTests(TestCase):
 
     def register_customer(self):
         response = self.client.post("/api/v1/auth/register/", {
-            "email": "buyer@example.com", "phone": "9999999999", "first_name": "Buyer", "last_name": "One", "password": "StrongPass123!",
+            "full_name": "Buyer One", "email": "buyer@example.com", "phone": "9999999999", "password": "StrongPass123!", "confirm_password": "StrongPass123!", "terms_accepted": True,
         }, format="json")
         self.assertEqual(response.status_code, 201, response.data)
-        self.assertIn("refresh", response.data)
-        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
-        return response
+        self.assertNotIn("access", response.data)
+        verification_url = next(part for part in mail.outbox[-1].body.split() if part.startswith("http"))
+        verification_params = parse_qs(urlparse(verification_url).query)
+        verified = self.client.post("/api/v1/auth/verify-email/", {
+            "uid": verification_params["uid"][0], "token": verification_params["token"][0],
+        }, format="json")
+        self.assertEqual(verified.status_code, 200, verified.data)
+        login = self.client.post("/api/v1/auth/login/", {"login": "buyer@example.com", "password": "StrongPass123!"}, format="json")
+        self.assertEqual(login.status_code, 200, login.data)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.data['access']}")
+        mail.outbox.clear()
+        return login
 
-    def test_new_newsletter_subscription_is_saved(self):
+    def test_product_list_honours_requested_page_size(self):
+        for index in range(2, 8):
+            Product.objects.create(
+                category=self.category,
+                name=f"Paged product {index}",
+                description="A paginated product",
+                regular_price=Decimal("1000.00"),
+                status=Product.Status.ACTIVE,
+            )
+
+        response = self.client.get("/api/v1/products/?page=2&page_size=6&ordering=-created_at")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["count"], 7)
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertIsNone(response.data["next"])
+        self.assertIsNotNone(response.data["previous"])
+
+    @override_settings(FRONTEND_VERIFY_EMAIL_URL="https://store.example.com/verify-email")
+    def test_customer_must_verify_email_before_login(self):
+        response = self.client.post("/api/v1/auth/register/", {
+            "full_name": "Unverified Buyer", "email": "unverified@example.com", "phone": "9999999999",
+            "password": "StrongPass123!", "confirm_password": "StrongPass123!", "terms_accepted": True,
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertNotIn("access", response.data)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("Verify my email", mail.outbox[0].alternatives[0][0])
+
+        login = self.client.post("/api/v1/auth/login/", {"login": "unverified@example.com", "password": "StrongPass123!"}, format="json")
+        self.assertEqual(login.status_code, 400)
+        self.assertEqual(login.data["email"], ["Please verify your email address before logging in."])
+
+        verification_url = next(part for part in mail.outbox[0].body.split() if part.startswith("http"))
+        parsed_url = urlparse(verification_url)
+        self.assertEqual(parsed_url.scheme, "https")
+        self.assertEqual(parsed_url.netloc, "store.example.com")
+        self.assertEqual(parsed_url.path, "/verify-email")
+        params = parse_qs(urlparse(verification_url).query)
+        verified = self.client.post("/api/v1/auth/verify-email/", {"uid": params["uid"][0], "token": params["token"][0]}, format="json")
+        self.assertEqual(verified.status_code, 200, verified.data)
+        self.assertTrue(CustomerProfile.objects.get(user__email="unverified@example.com").email_verified)
+
+    @override_settings(MAILERS={"default": {"BACKEND": "django.core.mail.backends.locmem.EmailBackend"}})
+    def test_new_newsletter_subscription_is_saved_and_receives_welcome_email(self):
         response = self.client.post("/api/v1/newsletter/", {"email": "reader@example.com", "source": "homepage"}, format="json")
         self.assertEqual(response.status_code, 201)
         self.assertTrue(NewsletterSubscription.objects.filter(email="reader@example.com", is_active=True).exists())
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["reader@example.com"])
+        self.assertIn("Welcome to FABRIQX!", mail.outbox[0].body)
+        welcome_html, mime_type = mail.outbox[0].alternatives[0]
+        self.assertEqual(mime_type, "text/html")
+        self.assertIn("WELCOME TO THE FAMILY", welcome_html)
+
+    def test_customer_signup_requires_matching_password_and_terms_acceptance(self):
+        response = self.client.post("/api/v1/auth/register/", {
+            "full_name": "Buyer One", "email": "buyer@example.com", "phone": "9999999999",
+            "password": "StrongPass123!", "confirm_password": "DifferentPass123!", "terms_accepted": False,
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("confirm_password", response.data)
+
+    def test_influencer_email_cannot_be_registered_as_a_customer(self):
+        influencer_user = get_user_model().objects.create_user(
+            username="creator", email="creator@example.com", password="CreatorPass123!"
+        )
+        InfluencerProfile.objects.create(user=influencer_user)
+
+        response = self.client.post("/api/v1/auth/register/", {
+            "full_name": "Creator Customer", "email": "creator@example.com", "phone": "9999999999",
+            "password": "StrongPass123!", "confirm_password": "StrongPass123!", "terms_accepted": True,
+        }, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.data["email"],
+            ["This email is already registered as an influencer and cannot be used for a customer account."],
+        )
+
+    def test_customer_cannot_also_be_created_as_an_influencer(self):
+        user = get_user_model().objects.create_user(
+            username="customer", email="customer@example.com", password="CustomerPass123!"
+        )
+        CustomerProfile.objects.create(user=user)
+
+        with self.assertRaisesMessage(ValidationError, "A customer account cannot also be created as an influencer."):
+            InfluencerProfile.objects.create(user=user)
+
+    def test_product_search_filters_by_text_nested_category_color_size_and_price(self):
+        apparel = Category.objects.create(name="Apparel")
+        saree = Category.objects.create(name="Saree", parent=apparel)
+        matching = Product.objects.create(
+            category=saree, name="Blue Silk Saree", description="Celebration silk saree",
+            regular_price=Decimal("3000.00"), sale_price=Decimal("2400.00"), status=Product.Status.ACTIVE,
+        )
+        ProductVariant.objects.create(product=matching, sku="SAREE-BLUE-M", color="Blue", size="M", stock_quantity=3)
+        other = Product.objects.create(
+            category=saree, name="Blue Silk Saree XS", description="Different variant",
+            regular_price=Decimal("3000.00"), status=Product.Status.ACTIVE,
+        )
+        ProductVariant.objects.create(product=other, sku="SAREE-BLUE-XS", color="Blue", size="XS", stock_quantity=3)
+
+        response = self.client.get(
+            "/api/v1/products/search/?q=silk&categories=apparel&colors=Blue&sizes=M&min_price=2000&max_price=2500&in_stock=true"
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["slug"], matching.slug)
+
+    def test_product_search_rejects_reversed_price_range(self):
+        response = self.client.get("/api/v1/products/search/?min_price=4000&max_price=500")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("price", response.data)
+
+    def test_newsletter_subscription_reports_already_subscribed_email(self):
+        NewsletterSubscription.objects.create(email="reader@example.com", is_active=True)
+
+        response = self.client.post("/api/v1/newsletter/", {"email": "reader@example.com"}, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["email"], ["This email is already subscribed."])
+
+    def test_contact_form_submission_is_saved(self):
+        response = self.client.post("/api/v1/contact/", {
+            "name": "Ananya Sharma",
+            "email": "ananya@example.com",
+            "phone": "9876543210",
+            "subject": "Order enquiry",
+            "message": "Please help me with my order.",
+        }, format="json")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(ContactSubmission.objects.filter(email="ananya@example.com", status="new").exists())
 
     def test_homepage_returns_active_structured_gift_sections(self):
         section = GiftSection.objects.create(
@@ -1560,14 +1915,52 @@ class CustomerApiTests(TestCase):
         response = self.client.get("/api/v1/homepage/", HTTP_HOST="testserver")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(response.data["gift_sections"]), 1)
+        self.assertEqual(len(response.data["gift_sections"]), 3)
         gift = response.data["gift_sections"][0]
         self.assertEqual(gift["internal_name"], "September free gift")
         self.assertEqual(gift["heading"], "Get More Joy!")
         self.assertEqual(gift["main_image"], "http://testserver/media/gift-sections/main/model.jpg")
-        self.assertEqual([feature["text"] for feature in gift["features"]], [f"Benefit {index}" for index in range(1, 6)])
-        self.assertEqual([statistic["value"] for statistic in gift["statistics"]], ["1K+", "2K+", "3K+"])
+        self.assertEqual(gift["badge_icon"], None)
+        self.assertEqual(gift["gift_image"], "http://testserver/media/gift-sections/gifts/gift.png")
+        self.assertEqual([feature["text"] for feature in gift["features"]], [f"Benefit {index}" for index in range(1, 7)])
+        self.assertEqual([statistic["value"] for statistic in gift["statistics"]], ["1K+", "2K+", "3K+", "4K+"])
         self.assertEqual(gift["cta_url"], "/products/")
+
+    def test_homepage_category_list_returns_active_root_categories(self):
+        category = Category.objects.create(name="Apparel", image="categories/apparel.jpg", display_order=1)
+        Category.objects.create(name="Saree", parent=category, image="categories/saree.jpg")
+        Category.objects.create(name="Hidden", is_active=False)
+
+        response = self.client.get("/api/v1/homepage/categories/", HTTP_HOST="testserver")
+
+        self.assertEqual(response.status_code, 200)
+        category_payload = next(item for item in response.data if item["slug"] == "apparel")
+        self.assertEqual(category_payload["image"], "http://testserver/media/categories/apparel.jpg")
+        self.assertTrue(category_payload["has_subcategories"])
+        self.assertEqual(category_payload["children"][0]["name"], "Saree")
+
+    def test_subcategory_list_returns_active_subcategories_for_category_page(self):
+        apparel = Category.objects.create(name="Apparel")
+        saree = Category.objects.create(name="Saree", parent=apparel, display_order=1)
+        Category.objects.create(name="Hidden", parent=apparel, is_active=False)
+
+        response = self.client.get(f"/api/v1/categories/{apparel.slug}/subcategories/", HTTP_HOST="testserver")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["category"]["slug"], apparel.slug)
+        self.assertTrue(response.data["category"]["has_subcategories"])
+        self.assertEqual([item["id"] for item in response.data["subcategories"]], [saree.id])
+        self.assertFalse(response.data["subcategories"][0]["has_subcategories"])
+
+    def test_homepage_product_collection_returns_only_requested_collection(self):
+        self.product.is_new_arrival = True
+        self.product.save(update_fields=("is_new_arrival",))
+
+        response = self.client.get("/api/v1/homepage/products/?collection=new_arrivals")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data[0]["slug"], self.product.slug)
+        self.assertEqual(self.client.get("/api/v1/homepage/products/?collection=invalid").status_code, 400)
 
     def test_homepage_returns_brand_logo_section_with_six_active_logos(self):
         section = BrandLogoSection.objects.create(background_color="#f7e8d8")
@@ -1583,9 +1976,20 @@ class CustomerApiTests(TestCase):
 
         payload = response.data["brand_logo_section"]
         self.assertEqual(payload["background_color"], "#f7e8d8")
-        self.assertEqual(len(payload["logos"]), 6)
+        self.assertEqual(len(payload["logos"]), 7)
         self.assertEqual(payload["logos"][0]["alt_text"], "Brand 1")
         self.assertEqual(payload["logos"][0]["logo"], "http://testserver/media/brand-logos/brand-1.svg")
+
+    def test_homepage_brand_list_returns_all_active_logos_in_display_order(self):
+        section = BrandLogoSection.objects.create()
+        second = BrandLogo.objects.create(section=section, brand_name="Second", logo="brand-logos/second.svg", display_order=2)
+        first = BrandLogo.objects.create(section=section, brand_name="First", logo="brand-logos/first.svg", display_order=1)
+        BrandLogo.objects.create(section=section, brand_name="Hidden", logo="brand-logos/hidden.svg", is_active=False)
+
+        response = self.client.get("/api/v1/homepage/brands/", HTTP_HOST="testserver")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([logo["id"] for logo in response.data], [first.id, second.id])
 
     def test_homepage_returns_offer_banner_and_three_grid_items(self):
         OfferBanner.objects.create(internal_name="Jewellery offer", desktop_image="offers/banner.jpg", shop_now_url="/jewellery/")
@@ -1596,16 +2000,27 @@ class CustomerApiTests(TestCase):
         response = self.client.get("/api/v1/homepage/", HTTP_HOST="testserver")
 
         self.assertEqual(response.data["offer_banners"][0]["shop_now_url"], "/jewellery/")
-        self.assertEqual(len(response.data["offer_grid"]["items"]), 3)
+        self.assertEqual(len(response.data["offer_grid"]["items"]), 4)
 
     def test_homepage_returns_footer_social_links(self):
         section = FooterSocialSection.objects.create(heading="SOCIAL")
-        FooterSocialLink.objects.create(section=section, platform_name="Instagram", icon="footer/social-icons/instagram.svg", url="https://instagram.com/fabriqx")
+        FooterSocialLink.objects.create(section=section, platform_name="instagram", url="https://instagram.com/fabriqx")
 
         response = self.client.get("/api/v1/homepage/", HTTP_HOST="testserver")
 
         self.assertEqual(response.data["footer_social"]["heading"], "SOCIAL")
         self.assertEqual(response.data["footer_social"]["links"][0]["aria_label"], "Instagram")
+
+    def test_footer_social_links_endpoint_returns_active_links(self):
+        section = FooterSocialSection.objects.create(heading="SOCIAL")
+        FooterSocialLink.objects.create(section=section, platform_name="instagram", url="https://instagram.com/fabriqx", display_order=1)
+        FooterSocialLink.objects.create(section=section, platform_name="facebook", url="https://example.com", is_active=False)
+
+        response = self.client.get("/api/v1/homepage/footer-social/", HTTP_HOST="testserver")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["heading"], "SOCIAL")
+        self.assertEqual([link["platform_name"] for link in response.data["links"]], ["Instagram"])
 
     def test_complete_influencer_dashboard_api_scope(self):
         influencer_user = get_user_model().objects.create_user(

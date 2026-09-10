@@ -1,87 +1,32 @@
 import csv
-import hashlib
-import ipaddress
-import socket
 from decimal import Decimal, InvalidOperation
-from io import BytesIO, TextIOWrapper
+from io import TextIOWrapper
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from zipfile import BadZipFile
+from openpyxl.utils.exceptions import InvalidFileException
 
-from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.core.files.base import ContentFile
 from django.db import transaction
 from django.utils.text import slugify
 from openpyxl import load_workbook
-from PIL import Image, UnidentifiedImageError
 
 from . import models as m
 
 
 SAMPLE_COLUMNS = (
-    "category", "category_audience", "product_name", "slug", "brand",
-    "short_description", "description", "regular_price", "sale_price", "status",
-    "is_featured", "is_trending", "is_new_arrival", "sku", "size", "color",
-    "color_code", "price_override", "stock_quantity", "low_stock_threshold",
-    "image_url", "image_path", "image_alt", "is_primary_image",
+    "category", "product_name", "brand", "short_description", "description",
+    "regular_price", "sale_price", "sale", "is_new_arrival", "sku", "size",
+    "color", "color_code", "stock_quantity",
 )
 
 SAMPLE_ROW = {
-    "category": "Dresses", "category_audience": "women", "product_name": "Silk Celebration Dress",
-    "slug": "silk-celebration-dress", "brand": "FABRIQX", "short_description": "Premium silk dress",
+    "category": "Dresses", "product_name": "Silk Celebration Dress", "brand": "FABRIQX",
+    "short_description": "Premium silk dress",
     "description": "Detailed product description", "regular_price": "2999.00", "sale_price": "2499.00",
-    "status": "active", "is_featured": "true", "is_trending": "true", "is_new_arrival": "true",
+    "sale": "true", "is_new_arrival": "true",
     "sku": "SILK-DRESS-M-RED", "size": "M", "color": "Red", "color_code": "#9B1C1C",
-    "price_override": "", "stock_quantity": "25", "low_stock_threshold": "5",
-    "image_url": "", "image_path": "", "image_alt": "Red silk celebration dress",
-    "is_primary_image": "true",
+    "stock_quantity": "25",
 }
-
-
-def _validate_public_url(url):
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
-        raise ValueError("image_url must be a public HTTP or HTTPS URL without embedded credentials.")
-    try:
-        addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)}
-    except socket.gaierror as exc:
-        raise ValueError("image_url hostname could not be resolved.") from exc
-    for address in addresses:
-        ip = ipaddress.ip_address(address)
-        if not ip.is_global:
-            raise ValueError("image_url cannot point to a private, local or reserved network address.")
-
-
-class _SafeRedirectHandler(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        target = urljoin(req.full_url, newurl)
-        _validate_public_url(target)
-        return super().redirect_request(req, fp, code, msg, headers, target)
-
-
-def _download_image(url, product_slug):
-    _validate_public_url(url)
-    max_bytes = int(getattr(settings, "PRODUCT_IMPORT_IMAGE_MAX_BYTES", 10 * 1024 * 1024))
-    timeout = int(getattr(settings, "PRODUCT_IMPORT_IMAGE_TIMEOUT", 15))
-    request = Request(url, headers={"User-Agent": "FABRIQX-Product-Importer/1.0", "Accept": "image/*"})
-    with build_opener(_SafeRedirectHandler()).open(request, timeout=timeout) as response:
-        content_length = response.headers.get("Content-Length")
-        if content_length and int(content_length) > max_bytes:
-            raise ValueError("Remote image exceeds the allowed size.")
-        data = response.read(max_bytes + 1)
-        if len(data) > max_bytes:
-            raise ValueError("Remote image exceeds the allowed size.")
-    try:
-        image = Image.open(BytesIO(data))
-        image.verify()
-        extension = (image.format or "JPEG").lower().replace("jpeg", "jpg")
-    except (UnidentifiedImageError, OSError) as exc:
-        raise ValueError("image_url did not return a valid image.") from exc
-    digest = hashlib.sha256(url.encode()).hexdigest()[:12]
-    # Pass only a filename to ImageField.save(); the field's upload_to setting
-    # chooses the local MEDIA_ROOT directory.
-    return f"{product_slug}-{digest}.{extension}", ContentFile(data)
 
 
 def _rows(upload):
@@ -90,12 +35,25 @@ def _rows(upload):
         yield from csv.DictReader(TextIOWrapper(upload.file, encoding="utf-8-sig"))
         return
     if suffix == ".xlsx":
-        workbook = load_workbook(upload, read_only=True, data_only=True)
-        sheet = workbook.active
-        iterator = sheet.iter_rows(values_only=True)
-        headers = [str(value or "").strip() for value in next(iterator)]
-        for values in iterator:
-            yield dict(zip(headers, values))
+        try:
+            workbook = load_workbook(upload, read_only=True, data_only=True)
+        except (BadZipFile, InvalidFileException, KeyError, ValueError, OSError) as exc:
+            raise ValueError("Invalid Excel file. Upload a valid .xlsx workbook using the product import template.") from exc
+        try:
+            sheet = workbook.active
+            if sheet is None:
+                raise ValueError("The Excel workbook has no worksheet.")
+            iterator = sheet.iter_rows(values_only=True)
+            headers = [str(value or "").strip() for value in next(iterator, ())]
+            required = ("category", "product_name", "regular_price", "sku")
+            missing = [name for name in required if name not in headers]
+            if missing:
+                raise ValueError("Missing required columns: " + ", ".join(missing) + ". Use the product import template.")
+            for values in iterator:
+                if any(value is not None and str(value).strip() for value in values):
+                    yield dict(zip(headers, values))
+        finally:
+            workbook.close()
         return
     raise ValueError("Upload a .csv or .xlsx file.")
 
@@ -151,15 +109,12 @@ def _process_row(raw):
     if missing:
         raise ValueError(f"Missing required column values: {', '.join(missing)}")
 
-    audience = str(row.get("category_audience") or m.Category.Audience.WOMEN).strip().lower()
-    if audience not in m.Category.Audience.values:
-        raise ValueError(f"Invalid category_audience: {audience}")
     category, _ = m.Category.objects.get_or_create(
         name=str(row["category"]).strip(), parent=None,
-        defaults={"audience": audience, "is_active": True},
+        defaults={"is_active": True},
     )
 
-    slug = str(row.get("slug") or slugify(str(row["product_name"]))).strip()
+    slug = slugify(str(row["product_name"]))
     product_defaults = {
         "category": category,
         "name": str(row["product_name"]).strip(),
@@ -168,13 +123,9 @@ def _process_row(raw):
         "description": str(row.get("description") or "").strip(),
         "regular_price": _decimal(row["regular_price"], Decimal("0")),
         "sale_price": _decimal(row.get("sale_price")),
-        "status": str(row.get("status") or m.Product.Status.DRAFT).strip().lower(),
-        "is_featured": _bool(row.get("is_featured")),
-        "is_trending": _bool(row.get("is_trending")),
+        "is_trending": _bool(row.get("sale")),
         "is_new_arrival": _bool(row.get("is_new_arrival")),
     }
-    if product_defaults["status"] not in m.Product.Status.values:
-        raise ValueError(f"Invalid product status: {product_defaults['status']}")
     product = m.Product.objects.filter(slug=slug).first()
     created_product = product is None
     if product:
@@ -190,43 +141,16 @@ def _process_row(raw):
         "size": str(row.get("size") or "").strip(),
         "color": str(row.get("color") or "").strip(),
         "color_code": str(row.get("color_code") or "").strip(),
-        "price_override": _decimal(row.get("price_override")),
         "stock_quantity": _integer(row.get("stock_quantity")),
-        "low_stock_threshold": _integer(row.get("low_stock_threshold"), 5),
         "is_active": True,
     }
     variant, variant_created = m.ProductVariant.objects.update_or_create(sku=str(row["sku"]).strip(), defaults=variant_defaults)
 
-    image_url = str(row.get("image_url") or "").strip()
-    image_path = str(row.get("image_path") or "").strip().replace("\\", "/")
-    if not image_url and urlparse(image_path).scheme in {"http", "https"}:
-        image_url, image_path = image_path, ""
-    image_created = False
-    if image_url:
-        generated_name, content = _download_image(image_url, product.slug)
-        existing_image = m.ProductImage.objects.filter(
-            product=product,
-            image__endswith=f"/{generated_name}",
-        ).exists()
-        if not existing_image:
-            image = m.ProductImage(product=product, alt_text=str(row.get("image_alt") or product.name), is_primary=_bool(row.get("is_primary_image")))
-            image.image.save(generated_name, content, save=True)
-            image_created = True
-    elif image_path:
-        candidate = Path(image_path)
-        if candidate.is_absolute() or ".." in candidate.parts:
-            raise ValueError("image_path must be relative to MEDIA_ROOT and cannot contain '..'.")
-        if not (settings.MEDIA_ROOT / candidate).is_file():
-            raise ValueError(f"Image not found under MEDIA_ROOT: {image_path}")
-        _, image_created = m.ProductImage.objects.get_or_create(
-            product=product, image=image_path,
-            defaults={"alt_text": str(row.get("image_alt") or product.name), "is_primary": _bool(row.get("is_primary_image"))},
-        )
-    return created_product, variant_created, image_created
+    return created_product, variant_created, False
 
 
 def import_products(upload, batch_size=500):
-    counts = {"rows": 0, "products": 0, "variants": 0, "images": 0, "failed": 0}
+    counts = {"rows": 0, "succeeded": 0, "products": 0, "variants": 0, "images": 0, "failed": 0}
     error_rows = {}
     batch = []
 
@@ -238,9 +162,14 @@ def import_products(upload, batch_size=500):
                 counts["products"] += int(product_created)
                 counts["variants"] += int(variant_created)
                 counts["images"] += int(image_created)
+                counts["succeeded"] += 1
             except Exception as exc:
                 counts["failed"] += 1
-                error = _format_error(exc)
+                product_name = str(row.get("product_name") or "").strip()
+                sku = str(row.get("sku") or "").strip()
+                identifier = " / ".join(value for value in (product_name, sku) if value)
+                prefix = f"{identifier}: " if identifier else ""
+                error = prefix + _format_error(exc)
                 if error in error_rows:
                     error_rows[error].append(row_number)
                 elif len(error_rows) < 50:

@@ -1,4 +1,64 @@
 {% extends "admin/delete_confirmation.html" %}
+{% load i18n admin_urls %}
+
 {% block content %}
-    {% if perms_lacking or protected %}{{ block.super }}{% else %}{% include "admin/delete_dialog.html" %}{% endif %}
+
+    {# --------------------------------------------------------- #}
+    {# CATEGORY CANNOT BE DELETED WHEN PRODUCTS ARE ASSIGNED     #}
+    {# --------------------------------------------------------- #}
+
+    {% if protected and opts.app_label == "products" and opts.model_name == "category" %}
+
+        <div data-delete-blocked>
+
+            <h2 id="delete-dialog-title">
+                {% translate "Cannot delete category" %}
+            </h2>
+
+            <p>
+                {% translate "This category cannot be deleted because 1 or more products are assigned to it." %}
+            </p>
+
+            <div class="dialog-actions">
+                <button
+                    type="button"
+                    data-delete-cancel
+                    autofocus
+                >
+                    {% translate "OK" %}
+                </button>
+            </div>
+
+            {% url opts|admin_urlname:'changelist' as cancel_url %}
+
+            <a
+                href="{{ cancel_url }}"
+                data-delete-return
+                hidden
+            >
+                {% translate "Back" %}
+            </a>
+
+        </div>
+
+
+    {# --------------------------------------------------------- #}
+    {# OTHER DJANGO PROTECTED/PERMISSION ERRORS                  #}
+    {# --------------------------------------------------------- #}
+
+    {% elif perms_lacking or protected %}
+
+        {{ block.super }}
+
+
+    {# --------------------------------------------------------- #}
+    {# NORMAL DELETE CONFIRMATION POPUP                          #}
+    {# --------------------------------------------------------- #}
+
+    {% else %}
+
+        {% include "admin/delete_dialog.html" %}
+
+    {% endif %}
+
 {% endblock %}

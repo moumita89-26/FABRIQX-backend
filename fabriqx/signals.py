@@ -3,7 +3,7 @@ from django.db.models.signals import post_delete, post_save, pre_save
 from django.dispatch import receiver
 
 from .middleware import current_actor
-from .models import AuditLog, InfluencerCommission, InfluencerProfile, Order, UserRole
+from .models import AuditLog, CustomerProfile, InfluencerCommission, InfluencerProfile, Order, UserRole
 
 
 @receiver(pre_save, sender="auth.User")
@@ -19,6 +19,24 @@ def enforce_single_super_admin(sender, instance, raw=False, **kwargs):
         was_super_admin = sender._default_manager.filter(pk=instance.pk, is_superuser=True).exists()
         if was_super_admin and not instance.is_superuser:
             raise ValidationError("The protected Super Admin status cannot be removed.")
+
+
+@receiver(pre_save, sender=CustomerProfile)
+def prevent_influencer_from_becoming_customer(sender, instance, raw=False, **kwargs):
+    """One user/email may represent one storefront account type only."""
+    if raw or not instance.user_id:
+        return
+    if InfluencerProfile.objects.filter(user_id=instance.user_id).exists():
+        raise ValidationError("An influencer account cannot also be created as a customer.")
+
+
+@receiver(pre_save, sender=InfluencerProfile)
+def prevent_customer_from_becoming_influencer(sender, instance, raw=False, **kwargs):
+    """Mirror the customer guard for admin and programmatic influencer creation."""
+    if raw or not instance.user_id:
+        return
+    if CustomerProfile.objects.filter(user_id=instance.user_id).exists():
+        raise ValidationError("A customer account cannot also be created as an influencer.")
 
 
 def should_audit(instance):

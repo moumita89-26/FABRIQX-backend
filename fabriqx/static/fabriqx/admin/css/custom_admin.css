@@ -24,12 +24,155 @@ html.dark body.change-form #content-main :is(input, textarea, select) {
     background-color: var(--color-base-900, #18181b);
     border-color: var(--color-base-700, #3f3f46);
 }
+/* Native checkboxes are rendered as an unlabelled white dot by some browsers
+   against the dark admin palette. Use a clear switch state for every boolean
+   field on change forms. */
+html.dark body.change-form #content-main input[type="checkbox"]:not(.action-select):not(.action-toggle) {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 34px;
+    min-width: 34px;
+    height: 20px;
+    min-height: 20px;
+    margin: 0;
+    border: 1px solid #9ca3af;
+    border-radius: 999px;
+    background: radial-gradient(circle at 9px center, #f8fafc 6px, #4b5563 6.5px);
+    cursor: pointer;
+    transition: background .15s ease, border-color .15s ease;
+}
+html.dark body.change-form #content-main input[type="checkbox"]:not(.action-select):not(.action-toggle):checked {
+    border-color: #22c55e;
+    background: radial-gradient(circle at 23px center, #fff 6px, #16a34a 6.5px);
+}
+html.dark body.change-form #content-main input[type="checkbox"]:not(.action-select):not(.action-toggle):focus-visible {
+    outline: 2px solid #fbbf24;
+    outline-offset: 2px;
+}
+html.dark body.change-form #content-main input[type="checkbox"]:not(.action-select):not(.action-toggle):disabled {
+    cursor: not-allowed;
+    opacity: .55;
+}
 html:not(.dark) body { background-color: #f6e9d9; color: #48342a; }
-html:not(.dark) .bg-white { background-color: #faf5ee; }
+/* Do not override Unfold's checked checkbox background. Its tick is white and
+   relies on the native checked utility supplying the primary-color fill. */
+html:not(.dark) .bg-white:not(input[type="checkbox"]) { background-color: #faf5ee; }
 html:not(.dark) #nav-sidebar-inner { background-color: #f6e9d9; }
+/* Explicit sidebar layout: these styles do not depend on generated utility CSS. */
+#nav-sidebar-apps > ol:first-child { margin: 0; padding: 8px 24px; list-style: none; }
+#nav-sidebar-apps > ol:first-child a { display: flex; align-items: center; min-height: 38px; padding: 0 12px; border-radius: 6px; text-decoration: none; }
+.sidebar-menu-group { margin: 5px 12px; }
+.sidebar-menu-heading { width: 100%; display: flex; align-items: center; gap: 8px; padding: 9px 12px; border: 0; border-radius: 6px; background: transparent; color: var(--color-font-important-light, #2a1e18); font-size: 14px; font-weight: 650; line-height: 20px; text-align: left; cursor: pointer; }
+.sidebar-menu-heading:hover { color: #d18821; }
+.sidebar-menu-chevron { margin-left: auto; font-size: 19px; transition: transform .15s ease; }
+.sidebar-menu-heading[aria-expanded="true"] .sidebar-menu-chevron { transform: rotate(90deg); }
+.sidebar-menu-items { display: flex; flex-direction: column; margin: 0; padding: 0 24px; list-style: none; }
+.sidebar-menu-items a { display: flex; align-items: center; min-height: 38px; margin: 0 -12px; padding: 0 12px; border-radius: 6px; color: #48342a; text-decoration: none; }
+.sidebar-menu-items a:hover { color: #d18821; }
+.sidebar-menu-items a.active { background: #efddc5; color: #d18821; font-weight: 650; }
+.sidebar-menu-items[hidden] { display: none !important; }
+html.dark .sidebar-menu-heading { color: var(--color-font-important-dark, #f6e9d9); }
+
+.fabriqx-dashboard-heading { padding: 4px 0 2px; }
+.fabriqx-dashboard-heading p { margin: 0 0 4px; color: #d18821; font-size: 12px; font-weight: 700; letter-spacing: .08em; }
+.fabriqx-dashboard-heading h1 { margin: 0; color: #2a1e18; font-family: Georgia, serif; font-size: 28px; font-weight: 500; }
+.fabriqx-dashboard-heading span { display: block; margin-top: 5px; color: #80563f; font-size: 13px; }
+
+/* Make the active reporting period easy to spot at a glance. */
+.fabriqx-date-range label[for$="date-range"] {
+    color: #8d4b1d;
+    font-weight: 700;
+}
+.fabriqx-date-range select[id$="date-range"] {
+    min-width: 140px;
+    border-color: #d97d26;
+    background-color: #fff1e4;
+    color: #8d4b1d;
+    font-weight: 700;
+    box-shadow: 0 0 0 3px rgb(217 125 38 / 14%);
+}
+.fabriqx-date-range select[id$="date-range"]:hover {
+    border-color: #bd6117;
+    background-color: #fce4cf;
+}
+.fabriqx-date-range select[id$="date-range"]:focus-visible {
+    outline: 2px solid #d97d26;
+    outline-offset: 2px;
+}
+.fabriqx-date-range select[id$="date-range"] option:checked {
+    background-color: #d97d26;
+    color: #fff;
+    font-weight: 700;
+}
+html.dark .fabriqx-date-range select[id$="date-range"] {
+    border-color: #e9a362;
+    background-color: #4b2c18;
+    color: #ffe3c4;
+}
+
+/* Reports do not need a dedicated row just for the date selector. */
+@media (min-width: 768px) {
+    .fabriqx-report-page { position: relative; }
+    .fabriqx-report-page > .fabriqx-date-range { position: absolute; top: 0; right: 0; z-index: 1; }
+    .fabriqx-report-page > .grid:first-of-type { padding-right: 170px; }
+}
+
+/* Admin list-selection controls use a forced white tick. This avoids the
+   browser-native black glyph and keeps every changelist visually consistent. */
+#changelist-form input[type="checkbox"].action-select,
+#changelist-form input[type="checkbox"].action-toggle {
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    width: 16px;
+    height: 16px;
+    border: 1px solid #d18821 !important;
+    border-radius: 4px;
+    background: #fffaf6 !important;
+    cursor: pointer;
+}
+#changelist-form input[type="checkbox"].action-select:checked,
+#changelist-form input[type="checkbox"].action-toggle:checked {
+    border-color: #d18821 !important;
+    background: #d18821 url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8l3 3 7-7' fill='none' stroke='%23fff' stroke-linecap='round' stroke-linejoin='round' stroke-width='2.4'/%3E%3C/svg%3E") center / 14px 14px no-repeat !important;
+}
+#changelist-form input[type="checkbox"].action-select:indeterminate,
+#changelist-form input[type="checkbox"].action-toggle:indeterminate {
+    border-color: #d18821 !important;
+    background: #d18821 linear-gradient(#fff, #fff) center / 8px 2px no-repeat !important;
+}
 .admin-row-actions { display: inline-flex; gap: 12px; white-space: nowrap; }
 .admin-row-action { color: var(--color-primary-700); text-decoration: underline; text-underline-offset: 3px; }
 .admin-row-action[href$="/delete/"] { color: #b91c1c; }
+.admin-list-image {
+    display: block;
+    width: 60px !important;
+    min-width: 60px !important;
+    max-width: 60px !important;
+    height: 46px !important;
+    min-height: 46px !important;
+    max-height: 46px !important;
+    object-fit: cover;
+    border: 1px solid var(--color-base-200, #e5d8c8);
+    border-radius: 5px;
+    background: #fffaf6;
+}
+
+/* Compact password-change panel. */
+.fabriqx-password-change { max-width: 540px; margin: 28px auto; }
+.fabriqx-password-card { padding: 28px; border: 1px solid #ead7c5; border-radius: 10px; background: #fffaf6; box-shadow: 0 2px 10px rgb(71 43 24 / 7%); }
+.fabriqx-password-card h1 { margin: 0; font-size: 22px; font-weight: 650; }
+.fabriqx-password-intro { margin: 8px 0 22px; color: #80563f; font-size: 14px; }
+.fabriqx-password-field { margin: 0 0 18px; }
+.fabriqx-password-field label { display: block; margin-bottom: 7px; font-weight: 600; }
+.fabriqx-password-field input { width: 100%; min-height: 40px; }
+.fabriqx-password-field .help { margin-top: 6px; color: #80563f; font-size: 12px; line-height: 1.45; }
+.fabriqx-password-field .help ul { margin: 4px 0 0 18px; list-style: disc; }
+.fabriqx-password-errors { margin-bottom: 16px; padding: 10px 12px; border-radius: 6px; background: #fef0cf; color: #88451c; font-size: 13px; }
+.fabriqx-password-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 24px; }
+.fabriqx-password-actions button, .fabriqx-password-cancel { border-radius: 6px; padding: 9px 16px; font-size: 14px; font-weight: 600; text-decoration: none; }
+.fabriqx-password-actions button { border: 1px solid #d18821; background: #d18821; color: #fff; cursor: pointer; }
+.fabriqx-password-cancel { border: 1px solid #e5d8c8; color: #5c4e3a; }
+@media (max-width: 640px) { .fabriqx-password-change { margin: 16px auto; } .fabriqx-password-card { padding: 20px; } }
 .fabriqx-column-sort a { padding: 2px 4px; opacity: .55; text-decoration: none; }
 .fabriqx-column-sort a:hover, .fabriqx-column-sort a:focus-visible, .fabriqx-column-sort a[aria-current="true"] { opacity: 1; color: var(--color-primary-600, #cf831a); }
 .admin-sort-control { display:flex; align-items:center; gap:10px; padding:12px; flex-wrap:wrap; }
@@ -63,4 +206,272 @@ html:not(.dark) #nav-sidebar-inner { background-color: #f6e9d9; }
 #changelist-search .keyboard-shortcut,
 #changelist-search [data-hotkey] {
     display: none !important;
+}
+
+
+/* Hide the History action from every admin change form. */
+body.change-form a[href$="/history/"],
+body.change-form a[href*="/history/?"] {
+    display: none !important;
+}
+
+/* Footer social-link inline: a fixed four-platform form with no icon upload. */
+#images-data td.field-tabular {
+    /* The upload field includes helper text, making its cell taller. Keep
+       every control top-aligned instead of vertically centering the others. */
+    vertical-align: top !important;
+}
+
+.footer-social-links-inline table {
+    table-layout: fixed;
+    width: 100%;
+}
+.footer-social-links-inline :is(th, td) {
+    vertical-align: top !important;
+}
+.fabriqx-page-arrow.disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+.footer-social-links-inline :is(th.column-platform_name, td.field-platform_name) {
+    width: 27%;
+}
+.footer-social-links-inline :is(th.column-url, td.field-url) {
+    width: 36%;
+}
+.footer-social-links-inline :is(th.column-display_order, td.field-display_order) {
+    width: 16%;
+}
+.footer-social-links-inline :is(th.column-is_active, td.field-is_active) {
+    width: 12%;
+}
+.footer-social-links-inline td.field-platform_name input,
+.footer-social-links-inline td.field-platform_name select,
+.footer-social-links-inline td.field-url input,
+.footer-social-links-inline td.field-display_order input {
+    width: 100% !important;
+    max-width: none !important;
+    box-sizing: border-box;
+}
+.footer-social-links-inline td.field-is_active {
+    padding-top: 10px;
+}
+
+/* Gift campaign inline rows contain image upload widgets, which are wider than
+   plain inputs. Give each column a stable width so icon previews never spill
+   into the Text and Display order columns. */
+.gift-section-features-inline table,
+.gift-section-statistics-inline table {
+    table-layout: fixed;
+    width: 100%;
+}
+.gift-section-features-inline :is(th, td),
+.gift-section-statistics-inline :is(th, td) {
+    vertical-align: top !important;
+    overflow: hidden;
+}
+.gift-section-features-inline :is(th.column-icon, td.field-icon) { width: 46%; }
+.gift-section-features-inline :is(th.column-text, td.field-text) { width: 23%; }
+.gift-section-features-inline :is(th.column-display_order, td.field-display_order) { width: 18%; }
+.gift-section-features-inline :is(th.column-is_active, td.field-is_active) { width: 10%; }
+
+.gift-section-statistics-inline :is(th.column-icon, td.field-icon) { width: 26%; }
+.gift-section-statistics-inline :is(th.column-eyebrow, td.field-eyebrow) { width: 17%; }
+.gift-section-statistics-inline :is(th.column-value, td.field-value) { width: 13%; }
+.gift-section-statistics-inline :is(th.column-label, td.field-label) { width: 17%; }
+.gift-section-statistics-inline :is(th.column-display_order, td.field-display_order) { width: 14%; }
+.gift-section-statistics-inline :is(th.column-is_active, td.field-is_active) { width: 9%; }
+
+.gift-section-features-inline td.field-icon > div,
+.gift-section-features-inline td.field-icon .flex.grow.relative,
+.gift-section-statistics-inline td.field-icon > div,
+.gift-section-statistics-inline td.field-icon .flex.grow.relative {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+.gift-section-features-inline td :is(input[type="text"], input[type="number"]),
+.gift-section-statistics-inline td :is(input[type="text"], input[type="number"]) {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+}
+.gift-section-features-inline td.field-is_active,
+.gift-section-statistics-inline td.field-is_active {
+    padding-top: 10px;
+    text-align: center;
+}
+@media (max-width: 1100px) {
+    .gift-section-features-inline table,
+    .gift-section-statistics-inline table { table-layout: auto; }
+}
+@media (max-width: 900px) {
+    .footer-social-links-inline table {
+        table-layout: auto;
+    }
+}
+
+/* FABRIQX admin pagination */
+#fabriqx-search-pagination {
+    width: 100% !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    margin: 0 !important;
+    padding: 24px 0 28px !important;
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+}
+
+#fabriqx-search-pagination::before,
+#fabriqx-search-pagination::after {
+    content: none !important;
+    display: none !important;
+}
+
+/* Flat pagination shell: no white footer panel and no top shadow. */
+#fabriqx-search-pagination .fabriqx-pagination-wrapper {
+    width: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+}
+
+#fabriqx-search-pagination .fabriqx-pagination {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 7px !important;
+    width: auto !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+    padding: 8px !important;
+    background: #fffaf6 !important;
+    border-radius: 10px !important;
+    box-shadow: none !important;
+}
+
+/* Number buttons */
+#fabriqx-search-pagination .fabriqx-pagination > a,
+#fabriqx-search-pagination .fabriqx-pagination > span {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    flex: 0 0 auto !important;
+    min-width: 38px !important;
+    width: 38px !important;
+    height: 38px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-sizing: border-box !important;
+    border: 1px solid transparent !important;
+    border-radius: 7px !important;
+    background: transparent !important;
+    color: #6d4024 !important;
+    font-size: 14px !important;
+    font-weight: 600 !important;
+    line-height: 1 !important;
+    text-decoration: none !important;
+    box-shadow: none !important;
+}
+
+#fabriqx-search-pagination .fabriqx-pagination > a:not(.fabriqx-page-arrow):hover {
+    background: #fcebdc !important;
+    border-color: #e8bd98 !important;
+    color: #d97d26 !important;
+}
+
+/* Current page: same orange used by the FABRIQX primary/Edit action. */
+#fabriqx-search-pagination .fabriqx-pagination > .this-page,
+#fabriqx-search-pagination .fabriqx-pagination > [aria-current="page"] {
+    background: #e8892d !important;
+    border-color: #e8892d !important;
+    color: #ffffff !important;
+    font-weight: 700 !important;
+}
+
+/* Previous / next */
+#fabriqx-search-pagination .fabriqx-pagination > .fabriqx-page-arrow {
+    width: 40px !important;
+    min-width: 40px !important;
+    height: 40px !important;
+    background: #fffaf6 !important;
+    border: 1px solid #edc9aa !important;
+    color: #8d4b1d !important;
+    font-size: 24px !important;
+    font-weight: 500 !important;
+}
+
+#fabriqx-search-pagination .fabriqx-pagination > a.fabriqx-page-arrow:hover {
+    background: #e8892d !important;
+    border-color: #e8892d !important;
+    color: #ffffff !important;
+}
+
+#fabriqx-search-pagination .fabriqx-pagination > .fabriqx-page-arrow.disabled {
+    opacity: .38 !important;
+    cursor: default !important;
+    pointer-events: none !important;
+}
+
+/* Ellipsis emitted by Django for long page ranges. */
+#fabriqx-search-pagination .fabriqx-pagination > .end,
+#fabriqx-search-pagination .fabriqx-pagination > .fabriqx-ellipsis {
+    width: 28px !important;
+    min-width: 28px !important;
+    border-color: transparent !important;
+    color: #97745c !important;
+}
+
+/* Hide any old Unfold/Django paginator/footer presentation left by the theme. */
+#changelist-footer,
+#changelist-footer .paginator,
+#changelist .paginator,
+.paginator {
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+}
+
+#changelist-footer::before,
+#changelist-footer::after,
+.paginator::before,
+.paginator::after {
+    content: none !important;
+    display: none !important;
+}
+
+#fabriqx-search-pagination .showall {
+    display: none !important;
+}
+
+@media (max-width: 640px) {
+    #fabriqx-search-pagination {
+        padding: 18px 8px 22px !important;
+        overflow-x: auto !important;
+    }
+
+    #fabriqx-search-pagination .fabriqx-pagination {
+        gap: 5px !important;
+        padding: 6px !important;
+    }
+
+    #fabriqx-search-pagination .fabriqx-pagination > a,
+    #fabriqx-search-pagination .fabriqx-pagination > span {
+        width: 34px !important;
+        min-width: 34px !important;
+        height: 34px !important;
+        font-size: 13px !important;
+    }
+
+    #fabriqx-search-pagination .fabriqx-pagination > .fabriqx-page-arrow {
+        width: 36px !important;
+        min-width: 36px !important;
+        height: 36px !important;
+        font-size: 21px !important;
+    }
 }

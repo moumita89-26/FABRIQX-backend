@@ -1,0 +1,7 @@
+{% include "unfold/forms/helpers/toolbar.html" %}
+
+<input type="hidden" name="{{ widget.name }}" id="{{ widget.input_id }}"{% if widget.value != None %} value="{{ widget.value }}"{% endif %}{% if widget.attrs.required %} required{% endif %}>
+
+<div class="max-w-4xl relative">
+    <trix-editor input="{{ widget.input_id }}" id="{{ widget.editor_id }}" class="{{ widget.attrs.class }}"{% if widget.attrs.required %} required{% endif %}></trix-editor>
+</div>

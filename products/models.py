@@ -39,3 +39,17 @@ class InventoryReport(base.InventoryReport):
         proxy = True
         verbose_name = "Inventory report"
         verbose_name_plural = "Inventory reports"
+
+
+class ProductFAQ(base.ProductFAQ):
+    class Meta:
+        proxy = True
+        verbose_name = "Product FAQ"
+        verbose_name_plural = "Product FAQs"
+
+
+class Review(base.Review):
+    class Meta:
+        proxy = True
+        verbose_name = "Review"
+        verbose_name_plural = "Reviews"

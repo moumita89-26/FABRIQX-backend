@@ -43,6 +43,13 @@ class OfferGridSection(base.OfferGridSection):
         verbose_name_plural = "Offer grid"
 
 
+class OfferGridItem(base.OfferGridItem):
+    class Meta:
+        proxy = True
+        verbose_name = "Offer grid"
+        verbose_name_plural = "Offer grid"
+
+
 class FooterSocialSection(base.FooterSocialSection):
     class Meta:
         proxy = True
@@ -74,8 +81,15 @@ class Page(base.Page):
         proxy = True
 
 
+class ContactSubmission(base.ContactSubmission):
+    class Meta:
+        proxy = True
+        verbose_name = "Contact"
+        verbose_name_plural = "Contacts"
+
+
 class BrandLogo(base.BrandLogo):
     class Meta:
         proxy = True
         verbose_name = "Brand logo"
-        verbose_name_plural = "Brand Logo Section"
+        verbose_name_plural = "Brand logos"

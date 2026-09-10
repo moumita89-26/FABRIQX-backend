@@ -31,6 +31,16 @@ class AdminColumnSortingTests(TestCase):
         self.assertEqual(list(ascending.queryset), [self.second, self.first])
         self.assertEqual(list(descending.queryset), [self.first, self.second])
 
+    def test_admin_lists_default_to_newest_record_first(self):
+        self.assertEqual(list(self.changelist(Product).queryset), [self.second, self.first])
+
+        first_category = Category.objects.create(name="First category")
+        second_category = Category.objects.create(name="Second category")
+        self.assertEqual(
+            list(self.changelist(Category).queryset)[:2],
+            [second_category, first_category],
+        )
+
     def test_effective_price_and_stock_status_are_sortable(self):
         cl = self.changelist(ProductVariant)
         headers = list(result_headers(cl))

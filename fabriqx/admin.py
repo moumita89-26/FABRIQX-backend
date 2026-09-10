@@ -1,5 +1,6 @@
 import csv
 import json
+from datetime import datetime
 from uuid import uuid4
 from io import BytesIO
 from urllib.parse import urlencode
@@ -12,18 +13,19 @@ from django.conf import settings
 from django.contrib.auth import get_user_model, update_session_auth_hash
 from django.contrib.auth.forms import UserCreationForm
 from django.contrib.auth.tokens import default_token_generator
-from django.contrib.auth.password_validation import validate_password
+from django.contrib.auth.password_validation import validate_password, password_validators_help_text_html
 from django.contrib.auth.models import Group, Permission
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.db import transaction
 from django.db import models as django_models
 from django.db.models import Q, Case, When, Value, F, Count, Sum, OuterRef, Subquery
-from django.db.models.functions import Coalesce, Concat
+from django.db.models.functions import Coalesce, Concat, TruncDay
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.mail import send_mail
 from django.http import HttpResponse, JsonResponse
-from django.shortcuts import redirect, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
+from django.templatetags.static import static
 from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html, format_html_join
@@ -38,16 +40,17 @@ from unfold.sites import UnfoldAdminSite
 from unfold.widgets import INPUT_CLASSES
 
 from . import models as m
+from .dashboard import DATE_RANGES, DEFAULT_RANGE, _period
 from .product_import import SAMPLE_COLUMNS, SAMPLE_ROW, import_products as run_product_import
 
 
 # Only models represented by a visible, delegable admin-sidebar item belong in
 # the staff access matrix. Admin-account management stays superuser-only.
 STAFF_MENU_MODELS = {
-    "content_management": {"banner", "brandlogo", "footersocialsection", "giftsection", "newslettersettings", "newslettersubscription", "offerbanner", "offergridsection", "page", "testimonial"},
+    "content_management": {"banner", "brandlogo", "contactsubmission", "footersocialsection", "giftsection", "homepagesection", "newslettersettings", "newslettersubscription", "offerbanner", "offergriditem", "page", "testimonial"},
     "customers": {"customerprofile"},
     "influencers": {"influencerprofile", "influencerreport"},
-    "products": {"category", "coupon", "inventorymovement", "inventoryreport", "productimage", "productvariant", "product"},
+    "products": {"category", "coupon", "inventorymovement", "inventoryreport", "productimage", "productvariant", "product", "productfaq", "review"},
 }
 STAFF_MENU_LABELS = {
     "content_management": "Content Management System",
@@ -58,6 +61,19 @@ STAFF_MENU_LABELS = {
 STAFF_MENU_ORDER = {app_label: position for position, app_label in enumerate(STAFF_MENU_MODELS)}
 
 
+class FabriqxWysiwygWidget(WysiwygWidget):
+    """Trix widget with separate IDs for its input and editable surface."""
+
+    template_name = "fabriqx/widgets/wysiwyg.html"
+
+    def get_context(self, name, value, attrs):
+        context = super().get_context(name, value, attrs)
+        widget = context["widget"]
+        widget["input_id"] = f"wysiwyg-{name}"
+        widget["editor_id"] = widget["attrs"].get("id", f"id_{name}")
+        return context
+
+
 def staff_permission_queryset():
     allowed = Q()
     for app_label, model_names in STAFF_MENU_MODELS.items():
@@ -66,6 +82,7 @@ def staff_permission_queryset():
     unavailable = {
         ("content_management", "newslettersubscription"): ("add",),
         ("customers", "customerprofile"): ("add", "delete"),
+        ("products", "inventorymovement"): ("add", "change", "delete"),
         ("products", "inventoryreport"): ("add", "change", "delete"),
         ("influencers", "influencerreport"): ("add", "change", "delete"),
     }
@@ -85,12 +102,46 @@ def normalize_unique_user_email(email, exclude_user_id=None):
     return email
 
 
+def image_list_preview(image, alt):
+    """Return a compact thumbnail for records that have an image."""
+    if not image:
+        return "—"
+    try:
+        url = image.url
+    except (AttributeError, ValueError):
+        return "—"
+    return format_html(
+        '<img class="admin-list-image" src="{}" alt="{}" loading="lazy" '
+        'style="display:block!important;width:60px!important;min-width:60px!important;'
+        'max-width:60px!important;height:46px!important;min-height:46px!important;'
+        'max-height:46px!important;object-fit:cover!important;">',
+        url,
+        alt,
+    )
+
+
 class ExportMixin:
-    actions = ("export_csv", "export_excel")
+    # Bulk exports are intentionally not exposed in any admin changelist.
+    # Classes that append custom actions to this tuple retain only those
+    # custom actions (for example, status updates or approvals).
+    actions = ()
     export_fields = None
 
     def get_export_fields(self):
         return self.export_fields or [field.name for field in self.model._meta.fields]
+
+    @staticmethod
+    def _export_value(value):
+        """Return audit dates in the configured local time for every export."""
+        # openpyxl accepts scalar values, but not Django model instances.  A
+        # ForeignKey is returned as its related object by getattr(), which
+        # previously made exports such as Inventory Movement fail at save time.
+        if isinstance(value, django_models.Model):
+            return str(value)
+        if isinstance(value, datetime):
+            if timezone.is_aware(value):
+                return timezone.localtime(value).replace(tzinfo=None)
+        return value
 
     @admin.action(description="Export selected rows as CSV")
     def export_csv(self, request, queryset):
@@ -100,7 +151,7 @@ class ExportMixin:
         writer = csv.writer(response)
         writer.writerow(fields)
         for obj in queryset.iterator():
-            writer.writerow([getattr(obj, field, "") for field in fields])
+            writer.writerow([self._export_value(getattr(obj, field, "")) for field in fields])
         return response
 
     @admin.action(description="Export selected rows as Excel")
@@ -111,7 +162,12 @@ class ExportMixin:
         sheet.title = self.model._meta.verbose_name_plural.title()[:31]
         sheet.append(fields)
         for obj in queryset.iterator():
-            sheet.append([str(getattr(obj, field, "") or "") for field in fields])
+            row = [self._export_value(getattr(obj, field, "")) for field in fields]
+            sheet.append(["" if value is None else value for value in row])
+        for row in sheet.iter_rows(min_row=2):
+            for cell in row:
+                if isinstance(cell.value, datetime):
+                    cell.number_format = "yyyy-mm-dd hh:mm:ss"
         stream = BytesIO()
         workbook.save(stream)
         response = HttpResponse(stream.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -177,12 +233,21 @@ class AdminListToolsMixin:
 
 
 class BaseAdmin(AdminListToolsMixin, ExportMixin, ModelAdmin):
-    list_per_page = 40
+    # Show 10 records per admin list page. Django/Unfold renders numbered
+    # pagination at the bottom when more than 10 records are available.
+    list_per_page = 10
+    # Admin lists should show the most recently created record first.  This
+    # deliberately overrides a model's public/display ordering while retaining
+    # sortable column headers for staff who need a different view.
+    ordering = ("-pk",)
     save_on_top = True
     hide_from_index = False
+    # Models that are intentionally read-only can opt into a View link while
+    # retaining just the row actions that make sense for their workflow.
+    row_actions = ("change", "delete")
 
     formfield_overrides = {
-        django_models.TextField: {"widget": WysiwygWidget},
+        django_models.TextField: {"widget": FabriqxWysiwygWidget},
     }
 
     # Hide audit timestamp fields from all normal admin forms.
@@ -275,19 +340,32 @@ class BaseAdmin(AdminListToolsMixin, ExportMixin, ModelAdmin):
 
     def get_list_display(self, request):
         columns = list(super().get_list_display(request))
+        can_view = self.has_view_permission(request)
         can_edit = self.has_change_permission(request)
         can_delete = self.has_delete_permission(request)
+        show_view = "view" in self.row_actions and can_view
+        show_edit = "change" in self.row_actions and can_edit
+        show_delete = "delete" in self.row_actions and can_delete
 
-        if can_edit or can_delete:
+        if show_view or show_edit or show_delete:
             @admin.display(description="Action")
             def row_actions(obj):
                 links = []
 
-                if can_edit:
+                if show_view or show_edit:
                     change_url = reverse(
                         f"admin:{obj._meta.app_label}_{obj._meta.model_name}_change",
                         args=(obj.pk,),
                     )
+                if show_view:
+                    links.append(
+                        format_html(
+                            '<a class="inline-flex items-center rounded-default bg-primary-600 px-3 py-1.5 font-medium text-white hover:bg-primary-700" href="{}">View</a>',
+                            change_url,
+                        )
+                    )
+
+                if show_edit:
                     links.append(
                         format_html(
                             '<a class="inline-flex items-center rounded-default bg-primary-600 px-3 py-1.5 font-medium text-white hover:bg-primary-700" href="{}">Edit</a>',
@@ -337,7 +415,7 @@ class CategoryAdmin(BaseAdmin):
     class CategoryForm(forms.ModelForm):
         class Meta:
             model = m.Category
-            exclude = ("audience",)
+            exclude = ("audience", "seo_title", "seo_description", "display_order")
 
         def clean(self):
             cleaned = super().clean()
@@ -349,13 +427,22 @@ class CategoryAdmin(BaseAdmin):
             return cleaned
 
     form = CategoryForm
-    list_display = ("drag_handle", "name", "parent", "display_order", "is_active", "updated_at")
+    list_display = ("image_thumbnail", "name", "parent", "is_active", "updated_at")
     list_filter = ("is_active", "parent")
     search_fields = ("name", "slug", "description")
     prepopulated_fields = {"slug": ("name",)}
     list_editable = ("is_active",)
-    readonly_fields = ("display_order",)
-    exclude = ("audience",)
+    exclude = ("audience", "seo_title", "seo_description", "display_order")
+
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj, **kwargs)
+        # The storefront supports root categories and one subcategory level.
+        if "parent" in form.base_fields:
+            parents = m.Category.objects.filter(parent__isnull=True)
+            if obj:
+                parents = parents.exclude(pk=obj.pk)
+            form.base_fields["parent"].queryset = parents
+        return form
 
     class Media:
         css = {"all": ("fabriqx/admin/category_sort.css",)}
@@ -373,9 +460,14 @@ class CategoryAdmin(BaseAdmin):
             obj.name,
         )
 
+    @admin.display(description="Image")
+    def image_thumbnail(self, obj):
+        return image_list_preview(obj.image, obj.name)
+
     def get_urls(self):
         custom_urls = [
             path("reorder/", self.admin_site.admin_view(self.reorder_view), name="products_category_reorder"),
+            path("<int:pk>/toggle-active/", self.admin_site.admin_view(self.toggle_active_view), name="products_category_toggle_active"),
         ]
         return custom_urls + super().get_urls()
 
@@ -406,11 +498,26 @@ class CategoryAdmin(BaseAdmin):
 
         return JsonResponse({"success": True})
 
+    def toggle_active_view(self, request, pk):
+        if request.method != "POST" or not self.has_change_permission(request):
+            return JsonResponse({"error": "You do not have permission to update categories."}, status=403)
+        try:
+            is_active = json.loads(request.body)["is_active"]
+        except (KeyError, TypeError, json.JSONDecodeError):
+            return JsonResponse({"error": "Invalid active status."}, status=400)
+        if not isinstance(is_active, bool):
+            return JsonResponse({"error": "Active status must be true or false."}, status=400)
+
+        category = get_object_or_404(self.model, pk=pk)
+        category.is_active = is_active
+        category.save(update_fields=("is_active", "updated_at"))
+        return JsonResponse({"success": True, "id": category.pk, "is_active": category.is_active})
+
 
 @admin.register(m.Product)
 class ProductAdmin(BaseAdmin):
     actions_list = ("import_products", "download_product_sample")
-    list_display = ("name", "category", "regular_price", "sale_price", "stock", "status", "is_featured", "is_trending")
+    list_display = ("image_thumbnail", "name", "category", "regular_price", "sale_price", "stock", "status", "is_featured", "is_trending")
     list_filter = ("status", "category", "is_featured", "is_trending", "is_new_arrival", "brand")
     search_fields = ("name", "slug", "brand", "variants__sku")
     autocomplete_fields = ("category", "related_products")
@@ -438,7 +545,11 @@ class ProductAdmin(BaseAdmin):
                     self.message_user(request, f"Import could not start: {exc}", messages.ERROR)
                 else:
                     level = messages.WARNING if counts["failed"] else messages.SUCCESS
-                    summary = f"Processed {counts['rows']} rows: {counts['products']} products, {counts['variants']} variants and {counts['images']} images created; {counts['failed']} rows failed."
+                    summary = (
+                        f"Processed {counts['rows']} rows: {counts['succeeded']} succeeded; "
+                        f"{counts['products']} products, {counts['variants']} variants and "
+                        f"{counts['images']} images created; {counts['failed']} rows failed."
+                    )
                     self.message_user(request, summary, level)
                     if errors:
                         visible_errors = errors[:5]
@@ -460,11 +571,8 @@ class ProductAdmin(BaseAdmin):
         sheet.append([SAMPLE_ROW[column] for column in SAMPLE_COLUMNS])
         instructions = workbook.create_sheet("Instructions")
         instructions.append(("Column", "Instructions"))
-        instructions.append(("One row per variant", "Repeat the product slug for additional size/color/SKU variants."))
-        instructions.append(("image_url", "For third-party images: enter the complete public HTTP/HTTPS URL. It is downloaded, validated and saved to local media storage."))
-        instructions.append(("image_path", "Leave blank when image_url is used. Only use this for a file that already exists under MEDIA_ROOT."))
-        instructions.append(("status", "draft, active or archived"))
-        instructions.append(("category_audience", "women, men, unisex or kids"))
+        instructions.append(("One row per variant", "Repeat the product name for additional size/color/SKU variants."))
+        instructions.append(("sale", "Sets whether the product appears in the sale/trending collection."))
         instructions.append(("boolean fields", "Use true/false, yes/no or 1/0."))
         stream = BytesIO()
         workbook.save(stream)
@@ -475,6 +583,14 @@ class ProductAdmin(BaseAdmin):
     @admin.display(description="Stock", ordering="_sort_stock")
     def stock(self, obj):
         return obj.total_stock
+
+    @admin.display(description="Image")
+    def image_thumbnail(self, obj):
+        product_image = next(iter(obj.images.all()), None)
+        return image_list_preview(product_image.image if product_image else None, obj.name)
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related("images")
 
 
 @admin.register(m.ProductVariant)
@@ -492,25 +608,16 @@ class InventoryAdmin(BaseAdmin):
     list_filter = ("movement_type", "created_at")
     search_fields = ("variant__sku", "variant__product__name", "reference", "reason")
     autocomplete_fields = ("variant",)
-    readonly_fields = ("stock_before", "stock_after", "created_by", "created_at", "updated_at")
+    readonly_fields = tuple(field.name for field in m.InventoryMovement._meta.fields)
+
+    def has_add_permission(self, request):
+        return False
 
     def has_change_permission(self, request, obj=None):
         return False if obj else super().has_change_permission(request, obj)
 
     def has_delete_permission(self, request, obj=None):
         return False
-
-    @transaction.atomic
-    def save_model(self, request, obj, form, change):
-        variant = m.ProductVariant.objects.select_for_update().get(pk=obj.variant_id)
-        after = variant.stock_quantity + obj.quantity
-        if after < 0:
-            raise ValueError("Stock adjustment would make inventory negative.")
-        obj.stock_before, obj.stock_after, obj.created_by = variant.stock_quantity, after, request.user
-        variant.stock_quantity = after
-        variant.save(update_fields=("stock_quantity", "updated_at"))
-        super().save_model(request, obj, form, change)
-
 
 class AddressInline(TabularInline):
     model = m.Address
@@ -551,30 +658,32 @@ class CustomerAdmin(BaseAdmin):
             return normalize_unique_user_email(self.cleaned_data["email"], current_user_id)
 
     form = CustomerChangeForm
-    list_display = ("user", "phone", "created_at", "edit_row_action")
+    list_display = ("user", "phone", "created_at")
     list_filter = ("created_at",)
     search_fields = ("user__username", "user__first_name", "user__last_name", "user__email", "phone")
     inlines = (AddressInline,)
     fields = ("username", "first_name", "last_name", "email", "phone", "date_of_birth", "created_at", "updated_at")
     readonly_fields = ("created_at", "updated_at")
     actions = ExportMixin.actions + ("send_password_reset",)
-
-    @admin.display(description="Edit")
-    def edit_row_action(self, obj):
-        change_url = reverse("admin:customers_customerprofile_change", args=(obj.pk,))
-        return format_html(
-            '<a class="inline-flex items-center rounded-default bg-primary-600 px-3 py-1.5 font-medium text-white hover:bg-primary-700" href="{}">Edit</a>',
-            change_url,
-        )
+    row_actions = ("view", "delete")
 
     def has_add_permission(self, request):
         return False
 
     def has_change_permission(self, request, obj=None):
-        return super().has_change_permission(request, obj)
+        return False
 
     def has_delete_permission(self, request, obj=None):
-        return False
+        return super().has_delete_permission(request, obj)
+
+    def delete_model(self, request, obj):
+        # A customer profile is owned by its auth user. Deleting only the
+        # profile leaves that user's unique email behind and blocks sign-up.
+        obj.user.delete()
+
+    def delete_queryset(self, request, queryset):
+        for customer in queryset.select_related("user"):
+            customer.user.delete()
 
     @transaction.atomic
     def save_model(self, request, obj, form, change):
@@ -742,12 +851,28 @@ class UserRoleInline(StackedInline):
     fields = ("role",)
 
 
+class StaffNameValidationMixin:
+    def clean_first_name(self):
+        return self._clean_name("first_name")
+
+    def clean_last_name(self):
+        return self._clean_name("last_name")
+
+    def _clean_name(self, field):
+        value = self.cleaned_data.get(field, "").strip()
+        if value and not all(character.isalpha() or character == " " for character in value):
+            raise forms.ValidationError("Name may contain letters and spaces only.")
+        return value
+
+
 class FabriqxUserAdmin(AdminListToolsMixin, BaseUserAdmin, ModelAdmin):
     permission_queryset = staff_permission_queryset()
+    list_per_page = 10
+    ordering = ("-pk",)
     readonly_fields = ("role_display",)
     list_filter = ()
 
-    class AdminAccountCreationForm(UserCreationForm):
+    class AdminAccountCreationForm(StaffNameValidationMixin, UserCreationForm):
         class Meta(UserCreationForm.Meta):
             fields = ("first_name", "last_name", "email")
 
@@ -761,7 +886,8 @@ class FabriqxUserAdmin(AdminListToolsMixin, BaseUserAdmin, ModelAdmin):
         )
         permissions = forms.ModelMultipleChoiceField(
             queryset=staff_permission_queryset(),
-            required=False,
+            required=True,
+            error_messages={"required": "Select at least one permission."},
         )
 
         def __init__(self, *args, **kwargs):
@@ -774,7 +900,7 @@ class FabriqxUserAdmin(AdminListToolsMixin, BaseUserAdmin, ModelAdmin):
         def clean_email(self):
             return normalize_unique_user_email(self.cleaned_data["email"])
 
-    class UserWithRoleForm(BaseUserAdmin.form):
+    class UserWithRoleForm(StaffNameValidationMixin, BaseUserAdmin.form):
         password = None
         password1 = forms.CharField(
             label="Password", required=False, strip=False,
@@ -793,13 +919,27 @@ class FabriqxUserAdmin(AdminListToolsMixin, BaseUserAdmin, ModelAdmin):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.fields["permissions"].widget = UserRoleAdmin.PermissionMatrixWidget(self.fields["permissions"].queryset)
-            self.fields["is_superuser"].disabled = True
-            self.fields["username"].help_text = ""
-            self.fields["is_superuser"].help_text = "The site has one protected Super Admin account. This status cannot be changed here."
+            # Account status fields (including is_superuser) are intentionally
+            # hidden from this form, so do not access them here.
+            if "username" in self.fields:
+                self.fields["username"].help_text = ""
+            self.fields["password1"].help_text = format_html(
+                "{}<p>{}</p>", password_validators_help_text_html(),
+                "Leave blank to keep the current password.",
+            )
+            self.fields["password2"].help_text = "Enter the same password again. Leave blank if you are not changing it."
             self.initial["permissions"] = list(self.instance.user_permissions.values_list("pk", flat=True))
 
         def clean_email(self):
-            return normalize_unique_user_email(self.cleaned_data["email"], self.instance.pk)
+            email = self.cleaned_data["email"].strip().lower()
+
+            # When editing an existing staff account, keeping the same email
+            # must never fail because of legacy duplicate rows in the database.
+            current_email = (self.instance.email or "").strip().lower() if self.instance and self.instance.pk else ""
+            if self.instance and self.instance.pk and email == current_email:
+                return email
+
+            return normalize_unique_user_email(email, self.instance.pk)
 
         def clean(self):
             cleaned_data = super().clean()
@@ -837,17 +977,16 @@ class FabriqxUserAdmin(AdminListToolsMixin, BaseUserAdmin, ModelAdmin):
         "last_name",
         "role_display",
         "is_staff",
-        "edit_account",
-        "delete_account",
+        "account_actions",
     )
     list_filter = BaseUserAdmin.list_filter + ("fabriqx_role__role",)
     inlines = ()
+    # Keep the edit screen focused on account details and permissions.
+    # Account status and Important dates are intentionally hidden from the UI.
     fieldsets = (
         (None, {"fields": ("username", "password1", "password2")}),
         ("Personal info", {"fields": ("first_name", "last_name", "email")}),
-        ("Account status", {"fields": ("role_display", "is_active", "is_staff", "is_superuser")}),
         ("Access permissions", {"fields": ("permissions",)}),
-        ("Important dates", {"fields": ("last_login", "date_joined")}),
     )
     add_fieldsets = (
         (None, {"fields": ("first_name", "last_name", "email", "password1", "password2")}),
@@ -875,22 +1014,32 @@ class FabriqxUserAdmin(AdminListToolsMixin, BaseUserAdmin, ModelAdmin):
         actions.pop("delete_selected", None)
         return actions
 
-    @admin.display(description="Edit")
-    def edit_account(self, obj):
+    @admin.display(description="Action")
+    def account_actions(self, obj):
         change_url = reverse("admin:auth_user_change", args=(obj.pk,))
-        return format_html(
+        edit_button = format_html(
             '<a class="inline-flex items-center rounded-default bg-primary-600 px-3 py-1.5 font-medium text-white hover:bg-primary-700" href="{}">Edit</a>',
             change_url,
         )
 
-    @admin.display(description="Delete")
-    def delete_account(self, obj):
+        # Super Admin stays protected from deletion, but no "Protected" text
+        # is shown in the table.
         if obj.is_superuser:
-            return format_html('<span class="text-base-400">{}</span>', "Protected")
+            return format_html(
+                '<div class="flex items-center gap-2">{}</div>',
+                edit_button,
+            )
+
         delete_url = reverse("admin:auth_user_delete", args=(obj.pk,))
-        return format_html(
+        delete_button = format_html(
             '<a class="inline-flex items-center rounded-default bg-red-600 px-3 py-1.5 font-medium text-white hover:bg-red-700" href="{}">Delete</a>',
             delete_url,
+        )
+
+        return format_html(
+            '<div class="flex items-center gap-2">{}{}</div>',
+            edit_button,
+            delete_button,
         )
 
     def get_queryset(self, request):
@@ -924,10 +1073,12 @@ class FabriqxUserAdmin(AdminListToolsMixin, BaseUserAdmin, ModelAdmin):
             username = obj.get_username()
             login_url = request.build_absolute_uri(reverse("admin:login"))
             password_change_url = request.build_absolute_uri(reverse("admin:password_change"))
+            logo_url = request.build_absolute_uri(static("branding/fabriqx-logo.jpeg"))
 
             def send_access_email():
                 context = {
                     "display_name": display_name,
+                    "logo_url": logo_url,
                     "login_url": login_url,
                     "username": username,
                     "email": recipient,
@@ -974,12 +1125,27 @@ class FabriqxUserAdmin(AdminListToolsMixin, BaseUserAdmin, ModelAdmin):
 @admin.register(m.Coupon)
 class CouponAdmin(BaseAdmin):
     class CouponForm(forms.ModelForm):
+        affiliate = forms.ModelChoiceField(
+            queryset=m.InfluencerProfile.objects.none(),
+            required=False,
+            label="Affiliate",
+            help_text="Optional. Link this coupon to one influencer affiliate.",
+        )
+
         class Meta:
             model = m.Coupon
-            fields = "__all__"
+            exclude = ("categories", "influencers")
 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
+            self.fields["affiliate"].queryset = m.InfluencerProfile.objects.select_related("user").order_by(
+                "user__first_name", "user__last_name", "user__username", "affiliate_id"
+            )
+            self.fields["affiliate"].label_from_instance = lambda influencer: (
+                f"{influencer.user.get_full_name() or influencer.user.get_username()} ({influencer.affiliate_id})"
+            )
+            if self.instance.pk:
+                self.fields["affiliate"].initial = self.instance.influencers.first()
             self.fields["starts_at"].help_text = "Start date cannot be earlier than today."
             widget = self.fields["starts_at"].widget
             if hasattr(widget, "widgets") and widget.widgets:
@@ -995,16 +1161,48 @@ class CouponAdmin(BaseAdmin):
                 raise forms.ValidationError("Start date cannot be earlier than today.")
             return starts_at
 
+        def clean_code(self):
+            code = (self.cleaned_data.get("code") or "").strip()
+            if not code:
+                raise forms.ValidationError("Enter a coupon code.")
+            return code.upper()
+
+        def clean(self):
+            cleaned_data = super().clean()
+            minimum_order_value = cleaned_data.get("minimum_order_value")
+            maximum_discount = cleaned_data.get("maximum_discount")
+            per_customer_limit = cleaned_data.get("per_customer_limit")
+
+            if minimum_order_value is not None and minimum_order_value < 0:
+                self.add_error("minimum_order_value", "Minimum order value cannot be negative.")
+            if maximum_discount is not None and maximum_discount < 0:
+                self.add_error("maximum_discount", "Maximum discount cannot be negative.")
+            if per_customer_limit is not None and per_customer_limit < 1:
+                self.add_error("per_customer_limit", "Per-customer limit must be at least 1.")
+            return cleaned_data
+
+        def _save_m2m(self):
+            super()._save_m2m()
+            affiliate = self.cleaned_data.get("affiliate")
+            self.instance.influencers.set([affiliate] if affiliate else [])
+
     form = CouponForm
-    list_display = ("code", "discount_type", "discount_value", "starts_at", "expires_at", "usage_count", "is_active")
+    list_display = ("code", "affiliate", "discount_type", "discount_value", "starts_at", "expires_at", "usage_count", "is_active")
     list_filter = ("discount_type", "is_active", "starts_at", "expires_at")
     search_fields = ("code", "description")
-    filter_horizontal = ("categories", "products", "influencers")
+    filter_horizontal = ("products",)
     list_editable = ("is_active",)
 
     @admin.display(description="Uses", ordering="_sort_usage_count")
     def usage_count(self, obj):
         return obj.usages.count()
+
+    @admin.display(description="Affiliate")
+    def affiliate(self, obj):
+        influencer = obj.influencers.select_related("user").first()
+        if not influencer:
+            return "—"
+        return f"{influencer.user.get_full_name() or influencer.user.get_username()} ({influencer.affiliate_id})"
 
 
 class OrderItemInline(TabularInline):
@@ -1083,7 +1281,7 @@ class InfluencerAdmin(BaseAdmin):
         first_name = forms.CharField(max_length=150, required=False, widget=forms.TextInput(attrs={**input_attrs, "autocomplete": "given-name"}))
         last_name = forms.CharField(max_length=150, required=False, widget=forms.TextInput(attrs={**input_attrs, "autocomplete": "family-name"}))
         email = forms.EmailField(widget=forms.EmailInput(attrs={**input_attrs, "autocomplete": "email"}))
-        password = forms.CharField(widget=forms.PasswordInput(attrs={**input_attrs, "autocomplete": "new-password"}), required=False, help_text="Required when creating an influencer. Leave blank when editing to keep the current password.")
+        password = forms.CharField(widget=forms.PasswordInput(attrs={**input_attrs, "autocomplete": "new-password"}), required=False)
         confirm_password = forms.CharField(widget=forms.PasswordInput(attrs={**input_attrs, "autocomplete": "new-password"}), required=False)
         address_line_1 = forms.CharField(label="Address line 1", max_length=255, required=False, widget=forms.TextInput(attrs=input_attrs))
         address_line_2 = forms.CharField(label="Address line 2", max_length=255, required=False, widget=forms.TextInput(attrs=input_attrs))
@@ -1099,10 +1297,17 @@ class InfluencerAdmin(BaseAdmin):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.fields["profile_image"].label = "Photo"
+            self.fields["password"].help_text = password_validators_help_text_html()
+            self.fields["confirm_password"].help_text = "Enter the same password again."
             address = self.instance.address if self.instance and isinstance(self.instance.address, dict) else {}
             for form_name, json_name in self.address_fields.items():
                 self.fields[form_name].initial = address.get(json_name, "")
             if self.instance and self.instance.pk:
+                self.fields["password"].help_text = format_html(
+                    "{}<p>{}</p>", password_validators_help_text_html(),
+                    "Leave blank to keep the current password.",
+                )
+                self.fields["confirm_password"].help_text = "Enter the same password again. Leave blank if you are not changing it."
                 self.fields["username"].initial = self.instance.user.username
                 self.fields["first_name"].initial = self.instance.user.first_name
                 self.fields["last_name"].initial = self.instance.user.last_name
@@ -1127,8 +1332,18 @@ class InfluencerAdmin(BaseAdmin):
             return username
 
         def clean_email(self):
+            email = self.cleaned_data["email"].strip().lower()
             current_user_id = self.instance.user_id if self.instance and self.instance.pk else None
-            return normalize_unique_user_email(self.cleaned_data["email"], current_user_id)
+
+            # On edit, allow the influencer to keep the email already attached
+            # to this account. This also avoids false validation errors when
+            # old/legacy user rows contain the same email address.
+            if current_user_id:
+                current_email = (self.instance.user.email or "").strip().lower()
+                if email == current_email:
+                    return email
+
+            return normalize_unique_user_email(email, current_user_id)
 
         def clean(self):
             cleaned = super().clean()
@@ -1181,16 +1396,40 @@ class InfluencerAdmin(BaseAdmin):
     list_display = ("affiliate_id", "user", "is_active")
     list_filter = ("is_active", "created_at")
     search_fields = ("affiliate_id", "user__username", "user__first_name", "user__last_name", "user__email")
-    readonly_fields = ("affiliate_id", "created_at", "updated_at")
+    readonly_fields = ("affiliate_id_display", "created_at", "updated_at")
     fieldsets = (
         ("Account credentials", {"fields": ("username", "first_name", "last_name", "email", "password", "confirm_password")}),
-        ("Influencer profile", {"fields": ("affiliate_id", "phone", "profile_image", "is_active")}),
+        ("Influencer profile", {"fields": ("affiliate_id_display", "phone", "profile_image", "is_active")}),
         ("Address", {"fields": ("address_line_1", "address_line_2", "address_city", "address_state", "address_postal_code", "address_country")}),
         ("Audit", {"fields": ("created_at", "updated_at"), "classes": ("collapse",)}),
     )
 
+    @admin.display(description="Affiliate id")
+    def affiliate_id_display(self, obj):
+        if obj and getattr(obj, "affiliate_id", None):
+            return obj.affiliate_id
+        return "The Influencer ID will be visible once the account has been successfully created."
+
     @admin.display(description="Orders", ordering="_sort_referred_orders")
     def referred_orders(self, obj): return obj.orders.count()
+
+    def message_user(self, request, message, level=messages.INFO, extra_tags="", fail_silently=False):
+        """Replace Django's default influencer-created message with the invitation email message."""
+        message_text = str(message)
+        if "was added successfully" in message_text:
+            email = (request.POST.get("email") or "").strip()
+            if email:
+                message = f"Invitation email sent successfully to {email}."
+            else:
+                message = "Invitation email sent successfully."
+
+        return super().message_user(
+            request,
+            message,
+            level=level,
+            extra_tags=extra_tags,
+            fail_silently=fail_silently,
+        )
 
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)
@@ -1203,10 +1442,12 @@ class InfluencerAdmin(BaseAdmin):
         initial_password = form.cleaned_data["password"]
         affiliate_id = obj.affiliate_id
         login_url = settings.INFLUENCER_LOGIN_URL
+        logo_url = request.build_absolute_uri(static("branding/fabriqx-logo.jpeg"))
 
         def send_onboarding_email():
             context = {
                 "display_name": display_name,
+                "logo_url": logo_url,
                 "login_url": login_url,
                 "username": username,
                 "temporary_password": initial_password,
@@ -1254,13 +1495,44 @@ class CommissionAdmin(BaseAdmin):
     def reverse(self, request, queryset): self._update(request, queryset, m.InfluencerCommission.Status.REVERSED)
 
 
+class ReviewAttachmentInline(TabularInline):
+    model = m.ReviewAttachment
+    extra = 1
+    fields = ("image", "preview")
+    readonly_fields = ("preview",)
+
+    @admin.display(description="Preview")
+    def preview(self, obj):
+        return image_list_preview(obj.image, "Review attachment") if obj and obj.image else "—"
+
+
 @admin.register(m.Review)
 class ReviewAdmin(BaseAdmin):
-    list_display = ("product", "customer", "rating", "is_verified_purchase", "status", "created_at")
+    list_display = ("product", "customer", "rating", "attachment_preview", "is_verified_purchase", "status", "created_at")
     list_filter = ("status", "rating", "is_verified_purchase", "created_at")
     search_fields = ("product__name", "customer__user__username", "title", "body")
     autocomplete_fields = ("product", "customer", "order_item")
+    inlines = (ReviewAttachmentInline,)
     actions = ExportMixin.actions + ("approve", "reject")
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related("attachments")
+
+    @admin.display(description="Attachments")
+    def attachment_preview(self, obj):
+        previews = []
+        for attachment in obj.attachments.all()[:3]:
+            try:
+                previews.append(attachment.image.url)
+            except ValueError:
+                continue
+        if not previews:
+            return "—"
+        return format_html_join(
+            "", '<img src="{}" alt="Review attachment" loading="lazy" '
+            'style="width:36px;height:36px;object-fit:cover;border-radius:4px;margin-right:4px;">',
+            ((url,) for url in previews),
+        )
 
     @admin.action(description="Approve selected reviews")
     def approve(self, request, queryset): queryset.update(status=m.Review.Status.APPROVED)
@@ -1268,14 +1540,26 @@ class ReviewAdmin(BaseAdmin):
     def reject(self, request, queryset): queryset.update(status=m.Review.Status.REJECTED)
 
 
-@admin.register(m.ProductQuestion)
-class ProductQuestionAdmin(BaseAdmin):
-    hide_from_index = True
-    list_display = ("product", "customer", "is_published", "answered_at", "created_at")
-    list_filter = ("is_published", "answered_at", "created_at")
-    search_fields = ("product__name", "customer__user__username", "question", "answer")
-    autocomplete_fields = ("product", "customer")
+@admin.register(m.ProductFAQ)
+class ProductFAQAdmin(BaseAdmin):
+    list_display = ("product", "question_preview", "is_active", "display_order", "created_at")
+    list_filter = ("is_active", "created_at")
+    search_fields = ("product__name", "question", "answer")
+    autocomplete_fields = ("product",)
     readonly_fields = ("created_at", "updated_at")
+    actions = ExportMixin.actions + ("activate", "deactivate")
+
+    @admin.display(description="Question")
+    def question_preview(self, obj):
+        return obj.question[:80] + ("…" if len(obj.question) > 80 else "")
+
+    @admin.action(description="Activate selected FAQs")
+    def activate(self, request, queryset):
+        queryset.update(is_active=True)
+
+    @admin.action(description="Deactivate selected FAQs")
+    def deactivate(self, request, queryset):
+        queryset.update(is_active=False)
 
 
 class SimpleAdmin(BaseAdmin):
@@ -1340,7 +1624,7 @@ class BannerAdminForm(forms.ModelForm):
         model = m.Banner
         fields = "__all__"
         help_texts = {
-            "image": m.BANNER_LOGO_IMAGE_HELP_TEXT,
+            "image": m.HERO_BANNER_IMAGE_HELP_TEXT,
         }
         labels = {
             "image": "Change Image",
@@ -1352,7 +1636,7 @@ class BannerAdminForm(forms.ModelForm):
 
         if "image" in self.fields:
             self.fields["image"].widget.attrs.update({
-                "accept": ".jpg,.jpeg,.png,.gif",
+                "accept": ".jpg,.jpeg,.png,.gif,.webp",
             })
 
     def clean_image(self):
@@ -1372,17 +1656,18 @@ class BannerAdmin(BaseAdmin):
     form = BannerAdminForm
 
     list_display = (
+        "image_thumbnail",
         "title",
-        "display_order",
         "is_active",
     )
     search_fields = (
         "title",
         "subtitle",
     )
-    list_editable = (
-        "is_active",
-    )
+
+    @admin.display(description="Image")
+    def image_thumbnail(self, obj):
+        return image_list_preview(obj.image, obj.title)
 
     readonly_fields = (
         "image_preview",
@@ -1420,8 +1705,8 @@ class BannerAdmin(BaseAdmin):
                     alt="Banner preview"
                     style="
                         display:block;
-                        max-width:520px;
-                        max-height:260px;
+                        max-width:260px;
+                        max-height:130px;
                         width:auto;
                         height:auto;
                         object-fit:contain;
@@ -1449,14 +1734,14 @@ class BannerAdmin(BaseAdmin):
 class SectionAdmin(BaseAdmin):
     list_display = ("title", "section_type", "display_order", "is_active", "updated_at")
     list_filter = ("section_type", "is_active")
-    list_editable = ("is_active",)
     fieldsets = (
-        (None, {"fields": ("title", "section_type", "editor_content", "display_order", "is_active")}),
+        (None, {"fields": ("title", "section_type", "content", "editor_content", "display_order", "is_active")}),
     )
 
 
 class GiftSectionFeatureInline(TabularInline):
     model = m.GiftSectionFeature
+    classes = ("gift-section-features-inline",)
     extra = 5
     min_num = 5
     max_num = 5
@@ -1485,6 +1770,7 @@ class GiftSectionStatisticInline(TabularInline):
             labels = {"eyebrow": "Small text above value"}
 
     model = m.GiftSectionStatistic
+    classes = ("gift-section-statistics-inline",)
     form = GiftSectionStatisticForm
     extra = 3
     min_num = 3
@@ -1508,12 +1794,24 @@ class GiftSectionStatisticInline(TabularInline):
 
 @admin.register(m.GiftSection)
 class GiftSectionAdmin(BaseAdmin):
+    class GiftSectionAdminForm(forms.ModelForm):
+        class Meta:
+            model = m.GiftSection
+            fields = "__all__"
+            labels = {
+                "badge_icon": "Top-left free-gift badge image",
+                "gift_image": "Bottom-right gift-box image",
+            }
+            help_texts = {
+                "badge_icon": "Displayed over the top-left of the main campaign image.",
+                "gift_image": "Displayed beside the thank-you message at the bottom-right.",
+            }
+
+    form = GiftSectionAdminForm
     list_display = (
-        "internal_name",
+        "image_thumbnail",
+        "name",
         "heading",
-        "is_active",
-    )
-    list_editable = (
         "is_active",
     )
     search_fields = (
@@ -1521,6 +1819,14 @@ class GiftSectionAdmin(BaseAdmin):
         "heading",
         "description",
     )
+
+    @admin.display(description="Image")
+    def image_thumbnail(self, obj):
+        return image_list_preview(obj.main_image, obj.heading)
+
+    @admin.display(description="Name", ordering="internal_name")
+    def name(self, obj):
+        return obj.internal_name
 
     # Features and statistics stay on the same Gift Section edit page.
     inlines = (
@@ -1635,7 +1941,7 @@ class BrandLogoAdminForm(forms.ModelForm):
 
 class BrandLogoAdmin(BaseAdmin):
     form = BrandLogoAdminForm
-    list_display = ("logo_name", "logo_status", "updated_at")
+    list_display = ("image_thumbnail", "logo_name", "logo_status", "created_at", "updated_at")
     list_filter = ("is_active",)
     search_fields = ("brand_name",)
     readonly_fields = ("logo_preview",)
@@ -1648,6 +1954,10 @@ class BrandLogoAdmin(BaseAdmin):
     @admin.display(description="Logo Name", ordering="brand_name")
     def logo_name(self, obj):
         return obj.brand_name
+
+    @admin.display(description="Logo")
+    def image_thumbnail(self, obj):
+        return image_list_preview(obj.logo, obj.brand_name)
 
     @admin.display(description="Status", boolean=True, ordering="is_active")
     def logo_status(self, obj):
@@ -1737,7 +2047,7 @@ class BrandLogoSectionAdmin(BaseAdmin):
         url = reverse(f"admin:{opts.app_label}_{opts.model_name}_change", args=(section.pk,))
         return redirect(f"{url}?add_logo=1#logos-group")
 
-    list_display = ("internal_name", "is_active", "updated_at")
+    list_display = ("internal_name", "is_active", "created_at", "updated_at")
     inlines = (BrandLogoInline,)
     exclude = ("internal_name", "heading", "background_color", "is_active")
 
@@ -1751,14 +2061,17 @@ class BrandLogoSectionAdmin(BaseAdmin):
 
 @admin.register(m.OfferBanner)
 class OfferBannerAdmin(BaseAdmin):
-    list_display = ("internal_name", "display_order", "is_active")
-    list_editable = ("is_active",)
+    list_display = ("image_thumbnail", "internal_name", "is_active")
     list_filter = ("is_active",)
     search_fields = ("internal_name", "alt_text", "shop_now_url")
+
+    @admin.display(description="Image")
+    def image_thumbnail(self, obj):
+        return image_list_preview(obj.desktop_image, obj.alt_text or obj.internal_name)
     fieldsets = (
         ("Banner", {"fields": ("internal_name", "desktop_image", "mobile_image", "alt_text")}),
         ("Shop now link", {"fields": ("shop_now_url", "open_in_new_tab")}),
-        ("Display", {"fields": ("display_order", "is_active")}),
+        ("Display", {"fields": ("is_active",)}),
     )
 
 
@@ -1766,10 +2079,13 @@ class OfferGridItemAdminForm(forms.ModelForm):
     class Meta:
         model = m.OfferGridItem
         fields = (
+            "internal_name",
             "desktop_image",
             "shop_now_url",
+            "is_active",
         )
         labels = {
+            "internal_name": "Offer name",
             "desktop_image": "Change Image",
             "shop_now_url": "Shop Now Button URL",
         }
@@ -1916,12 +2232,43 @@ class OfferGridSectionAdmin(BaseAdmin):
         )
 
 
+class OfferGridItemListAdmin(BaseAdmin):
+    """Manage each homepage offer tile independently, without the section wrapper."""
+
+    form = OfferGridItemAdminForm
+    list_display = ("image_thumbnail", "internal_name", "shop_now_url", "is_active")
+    list_filter = ("is_active",)
+    search_fields = ("internal_name", "alt_text", "shop_now_url")
+    fields = ("internal_name", "desktop_image", "shop_now_url", "is_active")
+
+    @admin.display(description="Image")
+    def image_thumbnail(self, obj):
+        return image_list_preview(obj.desktop_image, obj.alt_text or obj.internal_name)
+
+    def save_model(self, request, obj, form, change):
+        if not obj.section_id:
+            obj.section = m.OfferGridSection.objects.order_by("pk").first()
+            if obj.section is None:
+                obj.section = m.OfferGridSection.objects.create(internal_name="Homepage offer grid")
+        super().save_model(request, obj, form, change)
+
+
 class FooterSocialLinkInline(TabularInline):
+    class FooterSocialLinkForm(forms.ModelForm):
+        class Meta:
+            model = m.FooterSocialLink
+            fields = "__all__"
+            # Explicitly use a normal URL input. This prevents any legacy
+            # clearable-file widget markup ("Currently: …") from appearing.
+            widgets = {"url": forms.URLInput}
+
     model = m.FooterSocialLink
-    extra = 0
-    min_num = 1
-    max_num = 10
-    fields = ("icon", "platform_name", "url", "is_active")
+    form = FooterSocialLinkForm
+    extra = 4
+    classes = ("footer-social-links-inline",)
+    min_num = 4
+    max_num = 4
+    fields = ("platform_name", "url", "display_order", "is_active")
 
     def get_formset(self, request, obj=None, **kwargs):
         kwargs["validate_min"] = True
@@ -1984,6 +2331,7 @@ class TestimonialAdmin(BaseAdmin):
     form = TestimonialAdminForm
 
     list_display = (
+        "image_thumbnail",
         "customer_name",
         "sub_text",
         "rating",
@@ -1998,9 +2346,10 @@ class TestimonialAdmin(BaseAdmin):
         "sub_text",
         "content",
     )
-    list_editable = (
-        "is_active",
-    )
+
+    @admin.display(description="Image")
+    def image_thumbnail(self, obj):
+        return image_list_preview(obj.image, obj.customer_name)
     fields = (
         "customer_name",
         "image",
@@ -2014,9 +2363,14 @@ class TestimonialAdmin(BaseAdmin):
 @admin.register(m.NewsletterSubscription)
 class NewsletterAdmin(BaseAdmin):
     list_display = ("email", "is_active")
-    list_editable = ("is_active",)
     list_filter = ("is_active",)
     search_fields = ("email",)
+
+    def get_search_results(self, request, queryset, search_term):
+        # Treat an email query literally, including spaces and punctuation,
+        # instead of Django's quoted-word search syntax.
+        term = search_term.strip()
+        return (queryset.filter(email__icontains=term) if term else queryset), False
 
     def has_add_permission(self, request):
         return False
@@ -2092,8 +2446,7 @@ class SiteSettingsAdmin(BaseAdmin):
     form = SiteSettingsForm
 
     fields = (
-        "commission_type",
-        "commission_rate",
+        ("commission_type", "commission_rate"),
         "commission_fixed_amount",
     )
 
@@ -2160,7 +2513,7 @@ class PageAdminForm(forms.ModelForm):
             "is_active",
         )
         widgets = {
-            "content": WysiwygWidget,
+            "content": FabriqxWysiwygWidget,
         }
         labels = {
             "title": "Page Title",
@@ -2187,15 +2540,29 @@ class PageAdmin(BaseAdmin):
     prepopulated_fields = {
         "slug": ("title",),
     }
-    list_editable = (
-        "is_active",
-    )
     fields = (
         "title",
         "slug",
         "content",
         "is_active",
     )
+
+
+@admin.register(m.ContactSubmission)
+class ContactSubmissionAdmin(BaseAdmin):
+    list_display = ("name", "email", "phone", "status", "created_at")
+    list_filter = ("status",)
+    search_fields = ("name", "email", "phone", "message")
+    row_actions = ("view", "delete")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return super().has_delete_permission(request, obj)
 
 
 @admin.register(m.Shipment)
@@ -2261,29 +2628,264 @@ class ReadOnlyReportAdmin(BaseAdmin):
     def has_delete_permission(self, request, obj=None): return False
 
 
+class StaticReportAdmin(ReadOnlyReportAdmin):
+    """Base view for report pages whose contents respect the selected period."""
+
+    report_columns = ()
+    report_rows = ()
+    report_cards = ()
+    report_chart_labels = ()
+    report_chart_values = ()
+    show_report_chart = True
+    report_heading = "Overview"
+
+    @staticmethod
+    def format_currency(value):
+        return f"₹{float(value or 0):,.0f}"
+
+    def get_report_rows(self, start_date, end_date):
+        return self.report_rows
+
+    def get_report_cards(self, start_date, end_date):
+        return self.report_cards
+
+    def get_report_chart(self, start_date, end_date):
+        return {
+            "labels": list(self.report_chart_labels),
+            "datasets": [{
+                "label": self.model._meta.verbose_name,
+                "data": list(self.report_chart_values),
+                "backgroundColor": "rgba(207, 126, 39, 0.72)",
+                "borderColor": "rgb(170, 93, 29)",
+                "borderWidth": 1,
+            }],
+        }
+
+    def changelist_view(self, request, extra_context=None):
+        if not self.has_view_permission(request):
+            raise PermissionDenied
+        valid_ranges = dict(DATE_RANGES)
+        date_range = request.GET.get("date_range", DEFAULT_RANGE)
+        date_range = date_range if date_range in valid_ranges else DEFAULT_RANGE
+        start_date, end_date = _period(date_range)
+        chart = self.get_report_chart(start_date, end_date)
+        context = {
+            **self.admin_site.each_context(request),
+            "title": self.model._meta.verbose_name_plural.title(),
+            "opts": self.model._meta,
+            "report_columns": self.report_columns,
+            "report_rows": self.get_report_rows(start_date, end_date),
+            "report_cards": self.get_report_cards(start_date, end_date),
+            "report_heading": self.report_heading,
+            "report_chart": json.dumps(chart),
+            "date_ranges": DATE_RANGES,
+            "date_range": date_range,
+            "date_range_label": valid_ranges[date_range],
+            "chart_options": json.dumps({
+                "responsive": True,
+                "maintainAspectRatio": False,
+                "plugins": {"legend": {"display": False}},
+                "scales": {"y": {"beginAtZero": True}},
+            }),
+            **(extra_context or {}),
+        }
+        return render(request, "fabriqx/static_report.html", context)
+
+
 @admin.register(m.SalesReport)
-class SalesReportAdmin(ReadOnlyReportAdmin):
-    list_display = ("number", "placed_at", "status", "email", "subtotal", "discount_total", "tax_total", "grand_total", "influencer")
-    list_filter = ("status", "placed_at", "influencer")
-    search_fields = ("number", "email", "phone")
-    date_hierarchy = "placed_at"
-    export_fields = ("number", "placed_at", "status", "email", "subtotal", "discount_total", "shipping_total", "tax_total", "grand_total")
+class SalesReportAdmin(StaticReportAdmin):
+    report_columns = ("Order", "Date", "Customer", "Status", "Items", "Total")
+    report_rows = (
+        ("ORD-2026-1048", "08 Sep 2026", "Aarav Sharma", "Delivered", "3", "₹4,899"),
+        ("ORD-2026-1047", "08 Sep 2026", "Meera Patel", "Shipped", "1", "₹2,499"),
+        ("ORD-2026-1046", "07 Sep 2026", "Ananya Rao", "Processing", "4", "₹7,250"),
+        ("ORD-2026-1045", "07 Sep 2026", "Kabir Singh", "Confirmed", "2", "₹3,799"),
+    )
+    report_cards = (("Total sales", "₹8,42,650"), ("Orders", "178"), ("Average order", "₹4,734"))
+    report_chart_labels = ("02 Sep", "03 Sep", "04 Sep", "05 Sep", "06 Sep", "07 Sep", "08 Sep")
+    report_chart_values = (42500, 51800, 47600, 69200, 73500, 88100, 64200)
+
+    def get_orders(self, start_date, end_date):
+        return m.Order.objects.filter(placed_at__date__range=(start_date, end_date))
+
+    def get_report_rows(self, start_date, end_date):
+        rows = [
+            (
+                order.number,
+                timezone.localtime(order.placed_at).strftime("%d %b %Y"),
+                order.customer or order.email,
+                order.get_status_display(),
+                str(order.items.count()),
+                self.format_currency(order.grand_total),
+            )
+            for order in self.get_orders(start_date, end_date).select_related("customer__user").prefetch_related("items")[:100]
+        ]
+        return rows or self.report_rows
+
+    def get_report_cards(self, start_date, end_date):
+        orders = self.get_orders(start_date, end_date)
+        totals = orders.aggregate(total=Sum("grand_total"), count=Count("id"))
+        count = totals["count"]
+        total = totals["total"] or 0
+        if not count:
+            return self.report_cards
+        return (
+            ("Total sales", self.format_currency(total)),
+            ("Orders", f"{count:,}"),
+            ("Average order", self.format_currency(total / count if count else 0)),
+        )
+
+    def get_report_chart(self, start_date, end_date):
+        totals = self.get_orders(start_date, end_date).annotate(
+            day=TruncDay("placed_at")
+        ).values("day").annotate(total=Sum("grand_total")).order_by("day")
+        if not totals:
+            return super().get_report_chart(start_date, end_date)
+        return {
+            "labels": [timezone.localtime(row["day"]).strftime("%d %b") for row in totals],
+            "datasets": [{
+                "label": "Sales",
+                "data": [float(row["total"] or 0) for row in totals],
+                "backgroundColor": "rgba(207, 126, 39, 0.72)",
+                "borderColor": "rgb(170, 93, 29)",
+                "borderWidth": 1,
+            }],
+        }
 
 
 @admin.register(m.InventoryReport)
-class InventoryReportAdmin(ReadOnlyReportAdmin):
-    list_display = ("sku", "product", "size", "color", "stock_quantity", "low_stock_threshold", "stock_status", "is_active")
-    list_filter = ("is_active", "product__category", "size", "color")
-    search_fields = ("sku", "product__name")
-    export_fields = ("sku", "product", "size", "color", "stock_quantity", "low_stock_threshold", "is_active")
+class InventoryReportAdmin(StaticReportAdmin):
+    report_columns = ("SKU", "Product", "Category", "Variant", "Stock", "Status")
+    report_rows = (
+        ("RYE-SAREE-01", "Royal Teal Embroidered Saree", "Apparel", "Teal", "42", "In stock"),
+        ("GOLD-JUTTI-02", "Golden Embroidered Jutti", "Footwear", "EU 38", "8", "Low stock"),
+        ("IVORY-KURTA-M", "Ivory & Black Kurta Set", "Apparel", "M", "27", "In stock"),
+        ("MIDNIGHT-SUIT-L", "Midnight Blue Suit Set", "Apparel", "L", "0", "Out of stock"),
+    )
+    report_cards = (("Total units", "1,864"), ("Low stock", "14"), ("Out of stock", "6"))
+    report_chart_labels = ("Apparel", "Footwear", "Accessories", "Jewellery")
+    report_chart_values = (100, 150, 50, 25)
+
+    def get_movements(self, start_date, end_date):
+        return m.InventoryMovement.objects.filter(created_at__date__range=(start_date, end_date))
+
+    def get_report_rows(self, start_date, end_date):
+        rows = [
+            (
+                movement.variant.sku,
+                movement.variant.product.name,
+                movement.variant.product.category.name,
+                ", ".join(filter(None, (movement.variant.size, movement.variant.color))) or "—",
+                f"{movement.quantity:+d}",
+                movement.get_movement_type_display(),
+            )
+            for movement in self.get_movements(start_date, end_date).select_related("variant__product__category")[:100]
+        ]
+        return rows or self.report_rows
+
+    def get_report_cards(self, start_date, end_date):
+        movements = self.get_movements(start_date, end_date)
+        if not movements.exists():
+            return self.report_cards
+        added = movements.filter(quantity__gt=0).aggregate(total=Sum("quantity"))["total"] or 0
+        removed = movements.filter(quantity__lt=0).aggregate(total=Sum("quantity"))["total"] or 0
+        return (
+            ("Stock movements", f"{movements.count():,}"),
+            ("Units added", f"{added:,}"),
+            ("Units removed", f"{abs(removed):,}"),
+        )
+
+    def get_report_chart(self, start_date, end_date):
+        totals = {
+            row["movement_type"]: row["total"]
+            for row in m.InventoryMovement.objects.filter(
+                created_at__date__range=(start_date, end_date)
+            ).values("movement_type").annotate(total=Count("id"))
+        }
+        if not totals:
+            return super().get_report_chart(start_date, end_date)
+        types = tuple(m.InventoryMovement.MovementType)
+        return {
+            "labels": [movement.label for movement in types],
+            "datasets": [{
+                "label": "Inventory movements",
+                "data": [totals.get(movement, 0) for movement in types],
+                "backgroundColor": "rgba(207, 126, 39, 0.72)",
+                "borderColor": "rgb(170, 93, 29)",
+                "borderWidth": 1,
+            }],
+        }
 
 
 @admin.register(m.InfluencerReport)
-class InfluencerReportAdmin(ReadOnlyReportAdmin):
-    list_display = ("influencer", "order", "eligible_amount", "rate", "commission_amount", "status", "paid_at")
-    list_filter = ("status", "created_at", "paid_at", "influencer")
-    search_fields = ("influencer__affiliate_id", "order__number", "payment_reference")
-    export_fields = ("influencer", "order", "eligible_amount", "rate", "commission_amount", "status", "payment_reference", "paid_at")
+class InfluencerReportAdmin(StaticReportAdmin):
+    show_report_chart = True
+    report_heading = "Influencer performance summary"
+    report_columns = ("Affiliate ID", "Influencer", "Referred orders", "Referral sales", "Paid", "Outstanding", "Status")
+    report_rows = (
+        ("INF-A7K-2Q91", "Ananya Krishnan", "38", "₹1,84,500", "₹14,200", "₹4,250", "Active"),
+        ("INF-M9P-4R82", "Meera Agarwal", "31", "₹1,42,800", "₹11,500", "₹2,780", "Active"),
+        ("INF-P3S-8T64", "Priya Sharma", "26", "₹1,16,250", "₹9,800", "₹1,825", "Active"),
+        ("INF-N6V-1B53", "Neha Verma", "19", "₹82,900", "₹6,100", "₹2,190", "Inactive"),
+    )
+    report_cards = (
+        ("Active influencers", "32"),
+        ("Referred orders", "114"),
+        ("Referral sales", "₹8,76,450"),
+    )
+    report_chart_labels = ("Ananya", "Meera", "Priya", "Neha")
+    report_chart_values = (184500, 142800, 116250, 82900)
+
+    def get_orders(self, start_date, end_date):
+        return m.Order.objects.filter(
+            placed_at__date__range=(start_date, end_date), influencer__isnull=False,
+        )
+
+    def get_report_rows(self, start_date, end_date):
+        rows = self.get_orders(start_date, end_date).values(
+            "influencer__affiliate_id", "influencer__user__first_name", "influencer__user__last_name", "influencer__user__username", "influencer__is_active"
+        ).annotate(
+            orders=Count("id"), sales=Sum("grand_total"), paid=Sum("commission__commission_amount", filter=Q(commission__status=m.InfluencerCommission.Status.PAID)),
+            outstanding=Sum("commission__commission_amount", filter=~Q(commission__status=m.InfluencerCommission.Status.PAID)),
+        ).order_by("-sales")
+        report_rows = [
+            (
+                row["influencer__affiliate_id"],
+                " ".join(filter(None, (row["influencer__user__first_name"], row["influencer__user__last_name"]))) or row["influencer__user__username"],
+                str(row["orders"]), self.format_currency(row["sales"]), self.format_currency(row["paid"]), self.format_currency(row["outstanding"]),
+                "Active" if row["influencer__is_active"] else "Inactive",
+            ) for row in rows
+        ]
+        return report_rows or self.report_rows
+
+    def get_report_cards(self, start_date, end_date):
+        orders = self.get_orders(start_date, end_date)
+        totals = orders.aggregate(orders=Count("id"), sales=Sum("grand_total"))
+        if not totals["orders"]:
+            return self.report_cards
+        return (
+            ("Active influencers", f"{orders.filter(influencer__is_active=True).values('influencer_id').distinct().count():,}"),
+            ("Referred orders", f"{totals['orders']:,}"),
+            ("Referral sales", self.format_currency(totals["sales"] or 0)),
+        )
+
+    def get_report_chart(self, start_date, end_date):
+        rows = m.Order.objects.filter(
+            placed_at__date__range=(start_date, end_date),
+            influencer__isnull=False,
+        ).values("influencer__affiliate_id").annotate(total=Sum("grand_total")).order_by("-total")[:8]
+        if not rows:
+            return super().get_report_chart(start_date, end_date)
+        return {
+            "labels": [row["influencer__affiliate_id"] for row in rows],
+            "datasets": [{
+                "label": "Referral sales",
+                "data": [float(row["total"] or 0) for row in rows],
+                "backgroundColor": "rgba(207, 126, 39, 0.72)",
+                "borderColor": "rgb(170, 93, 29)",
+                "borderWidth": 1,
+            }],
+        }
 
 
 admin.site.index_template = "fabriqx/admin_dashboard.html"

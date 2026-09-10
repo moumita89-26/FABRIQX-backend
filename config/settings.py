@@ -84,6 +84,7 @@ REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20,
     'DEFAULT_THROTTLE_RATES': {
+        'contact_submission': '5/hour',
         'password_reset_request': '5/hour',
         'password_reset_confirm': '10/hour',
     },
@@ -106,6 +107,7 @@ SPECTACULAR_SETTINGS = {
 
 UNFOLD = {
     'SITE_TITLE': 'FABRIQX Admin',
+    'SITE_URL': 'https://developer-beta.com/fabriqx/',
     'SITE_HEADER': 'FABRIQX Administration',
     'SITE_SUBHEADER': 'Crafted for every celebration',
     'SITE_LOGO': {
@@ -116,6 +118,9 @@ UNFOLD = {
         'light': '/static/branding/fabriqx-logo.jpeg',
         'dark': '/static/branding/fabriqx-logo.jpeg',
     },
+    'SITE_FAVICONS': [
+        {'rel': 'icon', 'type': 'image/png', 'href': '/static/branding/favicon.png'},
+    ],
     'LOGIN': {
         'image': '/static/branding/fabriqx-logo.jpeg',
     },
@@ -231,7 +236,7 @@ AUTHENTICATION_BACKENDS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'Asia/Kolkata'
 
 USE_I18N = True
 
@@ -254,6 +259,7 @@ MARKETPLACE_ACCESS_KEY = os.environ.get('MARKETPLACE_ACCESS_KEY', '')
 MARKETPLACE_WEBHOOK_SECRET = os.environ.get('MARKETPLACE_WEBHOOK_SECRET', '')
 MARKETPLACE_CHECKOUT_URL = os.environ.get('MARKETPLACE_CHECKOUT_URL', '')
 FRONTEND_RESET_PASSWORD_URL = os.environ.get('FRONTEND_RESET_PASSWORD_URL', 'http://127.0.0.1:3000/reset-password')
+FRONTEND_VERIFY_EMAIL_URL = os.environ.get('FRONTEND_VERIFY_EMAIL_URL', 'http://127.0.0.1:3000/verify-email')
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@fabriqx.com')
 INFLUENCER_LOGIN_URL = os.environ.get('INFLUENCER_LOGIN_URL', 'http://127.0.0.1:3000/influencer/login')
 PRODUCT_IMPORT_IMAGE_MAX_BYTES = int(os.environ.get('PRODUCT_IMPORT_IMAGE_MAX_BYTES', str(10 * 1024 * 1024)))

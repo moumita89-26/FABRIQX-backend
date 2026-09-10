@@ -1,0 +1,23 @@
+{% load admin_list %}
+
+{% if pagination_required %}
+<div class="fabriqx-pagination-wrapper">
+    <nav class="fabriqx-pagination" aria-label="Pagination">
+        {% if cl.page_num > 0 %}
+            <a href="#" class="fabriqx-page-arrow" data-page-index="{{ cl.page_num|add:'-1' }}" aria-label="Previous page">&#8249;</a>
+        {% else %}
+            <span class="fabriqx-page-arrow disabled" aria-hidden="true">&#8249;</span>
+        {% endif %}
+
+        {% for i in page_range %}
+            {% paginator_number cl i %}
+        {% endfor %}
+
+        {% if cl.page_num < cl.paginator.num_pages|add:'-1' %}
+            <a href="#" class="fabriqx-page-arrow" data-page-index="{{ cl.page_num|add:'1' }}" aria-label="Next page">&#8250;</a>
+        {% else %}
+            <span class="fabriqx-page-arrow disabled" aria-hidden="true">&#8250;</span>
+        {% endif %}
+    </nav>
+</div>
+{% endif %}

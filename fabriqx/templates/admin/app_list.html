@@ -1,0 +1,302 @@
+{% load i18n %}
+
+{% if app_list %}
+    <div id="nav-sidebar-apps" class="h-0 grow overflow-auto scrollbar-default-hover">
+
+        <!-- Dashboard -->
+        <ol class="px-6 pt-2">
+            <li>
+                <a href="{% url 'admin:index' %}"
+                   class="flex items-center h-[38px] -mx-3 px-3 rounded-default truncate
+                          hover:text-primary-600 dark:hover:text-primary-500
+                          {% if request.path == '/admin/' %}
+                              bg-base-100 font-semibold text-primary-600
+                              dark:bg-white/[.06] dark:text-primary-500 active
+                          {% endif %}">
+
+                    <span class="material-symbols-outlined mr-3 w-[18px] shrink-0">
+                        home
+                    </span>
+
+                    <span>{% translate "Dashboard" %}</span>
+                </a>
+            </li>
+        </ol>
+
+
+        <!-- Application Groups -->
+        {% for app in app_list %}
+
+            {% if app.models and not app.hidden %}
+
+                <section
+                    class="sidebar-menu-group app-{{ app.app_label }}"
+                    data-sidebar-group
+                >
+
+                    <!-- Parent Heading -->
+                    <button
+                        type="button"
+                        class="sidebar-menu-heading"
+                        aria-expanded="true"
+                        aria-controls="sidebar-menu-{{ app.app_label }}"
+                        data-sidebar-toggle
+                    >
+
+                        <span>{{ app.name }}</span>
+
+                        <span
+                            class="material-symbols-outlined sidebar-menu-chevron"
+                            aria-hidden="true"
+                        >
+                            chevron_right
+                        </span>
+
+                    </button>
+
+
+                    <!-- Child Menu -->
+                    <ol
+                        id="sidebar-menu-{{ app.app_label }}"
+                        class="sidebar-menu-items"
+                    >
+
+                        {% for model in app.models %}
+
+                            {% if not model.hidden %}
+
+                                <li
+                                    class="
+                                        model-{{ model.object_name|lower }}
+                                        {% if model.admin_url in request.path|urlencode %}
+                                            current-model
+                                        {% endif %}
+                                    "
+                                >
+
+                                    {% if model.header %}
+
+                                        <h3
+                                            class="
+                                                font-medium
+                                                my-2
+                                                text-base-900
+                                                text-sm
+                                                dark:text-base-200
+                                            "
+                                        >
+                                            {{ model.header }}
+                                        </h3>
+
+                                    {% endif %}
+
+
+                                    {% if model.admin_url %}
+
+                                        <a
+                                            href="{{ model.admin_url }}"
+                                            id="link-{{ app.app_label }}-{{ model.object_name|lower }}"
+                                            class="
+                                                flex
+                                                items-center
+                                                h-[38px]
+                                                -mx-3
+                                                px-3
+                                                rounded-default
+                                                truncate
+                                                hover:text-primary-600
+                                                dark:hover:text-primary-500
+
+                                                {% if model.admin_url in request.path|urlencode %}
+                                                    bg-base-100
+                                                    font-semibold
+                                                    text-primary-600
+                                                    dark:bg-white/[.06]
+                                                    dark:text-primary-500
+                                                    active
+                                                {% endif %}
+                                            "
+                                        >
+
+                                            <!-- Menu Icon -->
+                                            <span
+                                                class="
+                                                    material-symbols-outlined
+                                                    md-18
+                                                    mr-3
+                                                    w-[18px]
+                                                    shrink-0
+                                                "
+                                                aria-hidden="true"
+                                            >
+
+                                                {% if model.object_name == "User" %}
+                                                    group
+
+                                                {% elif model.object_name == "Staff" %}
+                                                    manage_accounts
+
+                                                {% elif model.object_name == "CustomerProfile" %}
+                                                    person
+
+                                                {% elif model.object_name == "Customer" %}
+                                                    person
+
+
+                                                <!-- CMS -->
+
+                                                {% elif model.object_name == "Banner" %}
+                                                    image
+
+                                                {% elif model.object_name == "HeroBanner" %}
+                                                    image
+
+                                                {% elif model.object_name == "BrandLogo" %}
+                                                    verified
+
+                                                {% elif model.object_name == "BrandLogoSection" %}
+                                                    verified
+
+                                                {% elif model.object_name == "OfferBanner" %}
+                                                    sell
+
+                                                {% elif model.object_name == "OfferGridItem" %}
+                                                    grid_view
+
+                                                {% elif model.object_name == "OfferGridSection" %}
+                                                    grid_view
+
+                                                {% elif model.object_name == "GiftSection" %}
+                                                    redeem
+
+                                                {% elif model.object_name == "HomepageGiftSection" %}
+                                                    redeem
+
+                                                {% elif model.object_name == "Testimonial" %}
+                                                    format_quote
+
+                                                {% elif model.object_name == "FooterSocialSection" %}
+                                                    share
+
+                                                {% elif model.object_name == "FooterSocialLink" %}
+                                                    share
+
+                                                {% elif model.object_name == "NewsletterSettings" %}
+                                                    mail
+
+                                                {% elif model.object_name == "NewsletterSubscription" %}
+                                                    mark_email_read
+
+                                                {% elif model.object_name == "Page" %}
+                                                    description
+
+                                                {% elif model.object_name == "ContactSubmission" %}
+                                                    contact_support
+
+
+                                                <!-- Influencers -->
+
+                                                {% elif model.object_name == "Influencer" or model.name == "Manage Influencers" %}
+                                                    groups
+
+                                                {% elif model.object_name == "InfluencerReport" %}
+                                                    analytics
+
+
+                                                <!-- Products & Inventory -->
+
+                                                {% elif model.object_name == "Product" %}
+                                                    inventory_2
+
+                                                {% elif model.object_name == "ProductVariant" %}
+                                                    deployed_code
+
+                                                {% elif model.object_name == "ProductImage" %}
+                                                    photo_library
+
+                                                {% elif model.object_name == "Category" %}
+                                                    category
+
+                                                {% elif model.object_name == "InventoryMovement" %}
+                                                    inventory
+
+                                                {% elif model.object_name == "InventoryReport" %}
+                                                    monitoring
+
+                                                {% elif model.object_name == "ProductFAQ" %}
+                                                    quiz
+
+                                                {% elif model.object_name == "Review" %}
+                                                    rate_review
+
+                                                {% elif model.object_name == "Coupon" %}
+                                                    confirmation_number
+
+
+                                                <!-- Platform Administration -->
+
+                                                {% elif model.object_name == "SiteSetting" or model.name == "Site settings" %}
+                                                    settings
+
+
+                                                <!-- Default icon -->
+
+                                                {% else %}
+                                                    radio_button_checked
+                                                {% endif %}
+
+                                            </span>
+
+
+                                            <span>
+                                                {{ model.name }}
+                                            </span>
+
+                                        </a>
+
+                                    {% else %}
+
+                                        <div class="flex items-center">
+
+                                            <span
+                                                class="
+                                                    material-symbols-outlined
+                                                    md-18
+                                                    mr-3
+                                                    w-[18px]
+                                                "
+                                            >
+                                                radio_button_checked
+                                            </span>
+
+                                            <span>
+                                                {{ model.name }}
+                                            </span>
+
+                                        </div>
+
+                                    {% endif %}
+
+                                </li>
+
+                            {% endif %}
+
+                        {% endfor %}
+
+                    </ol>
+
+                </section>
+
+            {% endif %}
+
+        {% endfor %}
+
+    </div>
+
+{% else %}
+
+    <p>
+        {% trans "You don’t have permission to view or edit anything." %}
+    </p>
+
+{% endif %}

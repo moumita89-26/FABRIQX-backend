@@ -1,8 +1,11 @@
 import uuid
 from decimal import Decimal
 import re
+from pathlib import Path
+from io import BytesIO
 
 from django.conf import settings
+from django.core.files.base import ContentFile
 from django.core.exceptions import ValidationError
 from django.core.validators import FileExtensionValidator, MaxValueValidator, MinValueValidator
 from django.db import models
@@ -11,25 +14,59 @@ from django.utils import timezone
 from django.utils.text import slugify
 
 
-BANNER_LOGO_IMAGE_HELP_TEXT = "Allowed formats: JPG, JPEG, PNG, GIF. Maximum file size: 5 MB."
+HERO_BANNER_WIDTH = 1920
+HERO_BANNER_HEIGHT = 890
+BANNER_LOGO_IMAGE_HELP_TEXT = "Allowed formats: JPG, JPEG, PNG, GIF, WEBP. Maximum file size: 5 MB."
+HERO_BANNER_IMAGE_HELP_TEXT = (
+    f"{BANNER_LOGO_IMAGE_HELP_TEXT} "
+    f"Hero banner images are automatically center-cropped and resized to {HERO_BANNER_WIDTH} × {HERO_BANNER_HEIGHT} pixels."
+)
 
 
 def validate_banner_logo_image(image):
     if not image or getattr(image, "_committed", False):
         return
-    FileExtensionValidator(allowed_extensions=["jpg", "jpeg", "png", "gif"])(image)
+    FileExtensionValidator(allowed_extensions=["jpg", "jpeg", "png", "gif", "webp"])(image)
     from PIL import Image, UnidentifiedImageError
     position = image.tell()
     try:
         image.seek(0)
         detected = Image.open(image)
-        if detected.format not in {"JPEG", "PNG", "GIF"}:
-            raise ValidationError("Only JPG, JPEG, PNG, and GIF images are allowed.")
+        if detected.format not in {"JPEG", "PNG", "GIF", "WEBP"}:
+            raise ValidationError("Only JPG, JPEG, PNG, GIF, and WEBP images are allowed.")
         detected.verify()
     except (UnidentifiedImageError, OSError, SyntaxError) as error:
-        raise ValidationError("Upload a valid JPG, JPEG, PNG, or GIF image.") from error
+        raise ValidationError("Upload a valid JPG, JPEG, PNG, GIF, or WEBP image.") from error
     finally:
         image.seek(position)
+
+
+def resize_hero_banner_image(image):
+    """Center-crop a newly uploaded image to the fixed storefront hero size."""
+    if not image or getattr(image, "_committed", False):
+        return
+    from PIL import Image, ImageOps
+
+    image.file.seek(0)
+    source = Image.open(image.file)
+    image_format = source.format or "JPEG"
+    processed = ImageOps.fit(
+        ImageOps.exif_transpose(source),
+        (HERO_BANNER_WIDTH, HERO_BANNER_HEIGHT),
+        method=Image.Resampling.LANCZOS,
+        centering=(0.5, 0.5),
+    )
+    if image_format == "JPEG" and processed.mode not in ("RGB", "L"):
+        processed = processed.convert("RGB")
+
+    output = BytesIO()
+    save_kwargs = {"format": image_format}
+    if image_format in {"JPEG", "WEBP"}:
+        save_kwargs.update({"quality": 90, "optimize": True})
+    elif image_format == "PNG":
+        save_kwargs["optimize"] = True
+    processed.save(output, **save_kwargs)
+    image.file = ContentFile(output.getvalue(), name=image.name)
 
 
 MAX_IMAGE_FILE_SIZE = 5 * 1024 * 1024
@@ -43,9 +80,43 @@ def validate_image_file_size(image):
         raise ValidationError("Image file size must not exceed 5 MB.")
 
 
+ICON_FILE_HELP_TEXT = "Allowed formats: SVG, JPG, JPEG, PNG, GIF, WEBP. Maximum file size: 5 MB."
+
+
+def validate_icon_file(file):
+    """Allow normal icon images and safe, non-scripted SVG icons."""
+    if not file or getattr(file, "_committed", False):
+        return
+    validate_image_file_size(file)
+    extension = Path(file.name).suffix.lower().lstrip(".")
+    FileExtensionValidator(allowed_extensions=["svg", "jpg", "jpeg", "png", "gif", "webp"])(file)
+    if extension != "svg":
+        return
+
+    position = file.tell()
+    try:
+        file.seek(0)
+        content = file.read().decode("utf-8", errors="ignore").lower()
+    finally:
+        file.seek(position)
+    forbidden = ("<script", "<foreignobject", "javascript:", "<!doctype")
+    if any(value in content for value in forbidden) or re.search(r"\son\w+\s*=", content):
+        raise ValidationError("SVG icons cannot contain scripts, event handlers, or embedded HTML.")
+
+
+def validate_profile_image(file):
+    """Allow project-standard raster images and sanitized SVG profile images."""
+    if not file or getattr(file, "_committed", False):
+        return
+    validate_icon_file(file)
+    if Path(file.name).suffix.lower() == ".svg":
+        return
+    validate_banner_logo_image(file)
+
+
 def validate_customer_name(value):
-    if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", value.strip()):
-        raise ValidationError("Customer name cannot contain only a numeric value.")
+    if not re.fullmatch(r"[A-Za-z]+(?: [A-Za-z]+)*", value.strip()):
+        raise ValidationError("Customer name may contain alphabetic characters and spaces only.")
 
 
 def reference(prefix):
@@ -85,6 +156,17 @@ class Category(TimeStampedModel):
 
     def __str__(self):
         return f"{self.parent} / {self.name}" if self.parent else self.name
+
+    def clean(self):
+        """Keep the storefront taxonomy to a root and one subcategory level."""
+        super().clean()
+        if self.parent_id and self.parent.parent_id:
+            raise ValidationError({"parent": "A subcategory cannot have its own subcategory."})
+        # A new subcategory has no primary key yet, so its reverse relation
+        # cannot be queried.  This check only matters when moving an existing
+        # category that may already have children.
+        if self.pk and self.parent_id and self.children.exists():
+            raise ValidationError({"parent": "A category with subcategories cannot be moved under another category."})
 
     def save(self, *args, **kwargs):
         self.slug = slugify(self.name)
@@ -214,6 +296,13 @@ class CustomerProfile(TimeStampedModel):
     phone = models.CharField(max_length=30, blank=True)
     date_of_birth = models.DateField(blank=True, null=True)
     marketing_consent = models.BooleanField(default=False)
+    profile_image = models.FileField(
+        upload_to="customers/profiles/",
+        blank=True,
+        validators=[validate_profile_image],
+        help_text=ICON_FILE_HELP_TEXT,
+    )
+    email_verified = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
 
     def __str__(self):
@@ -375,8 +464,18 @@ class InfluencerProfile(TimeStampedModel):
     def __str__(self):
         return f"{self.user.get_full_name() or self.user.username} ({self.affiliate_id})"
 
+    @classmethod
+    def generate_affiliate_id(cls):
+        """Generate a compact, unique ID in the form INF-XXX-XXXX."""
+        for _ in range(20):
+            token = uuid.uuid4().hex[:7].upper()
+            affiliate_id = f"INF-{token[:3]}-{token[3:]}"
+            if not cls.objects.filter(affiliate_id=affiliate_id).exists():
+                return affiliate_id
+        raise RuntimeError("Unable to generate a unique affiliate ID.")
+
     def save(self, *args, **kwargs):
-        self.affiliate_id = self.affiliate_id or reference("INF")
+        self.affiliate_id = self.affiliate_id or self.generate_affiliate_id()
         # Optional JSON form fields are cleaned to None when left empty, but
         # this column deliberately remains NOT NULL in the database.
         if self.address is None:
@@ -633,25 +732,49 @@ class Review(TimeStampedModel):
         return f"{self.product} — {self.rating}/5"
 
 
-class ProductQuestion(TimeStampedModel):
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="questions")
-    customer = models.ForeignKey(CustomerProfile, on_delete=models.PROTECT, related_name="product_questions")
-    question = models.TextField()
-    answer = models.TextField(blank=True)
-    is_published = models.BooleanField(default=False)
-    answered_at = models.DateTimeField(blank=True, null=True)
+class ReviewAttachment(TimeStampedModel):
+    """An image supplied with a customer product review."""
+
+    review = models.ForeignKey(Review, on_delete=models.CASCADE, related_name="attachments")
+    image = models.ImageField(
+        upload_to="reviews/%Y/%m/",
+        validators=[validate_image_file_size],
+        help_text=IMAGE_FILE_SIZE_HELP_TEXT,
+    )
 
     class Meta:
-        ordering = ("-created_at",)
+        ordering = ("id",)
 
     def __str__(self):
-        return f"Question about {self.product}"
+        return f"Attachment for review #{self.review_id}"
+
+
+class ProductFAQ(TimeStampedModel):
+    """An FAQ written and maintained by the admin for a specific product."""
+
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="faqs")
+    question = models.TextField()
+    answer = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    display_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ("display_order", "id")
+        verbose_name = "Product FAQ"
+        verbose_name_plural = "Product FAQs"
+
+    def __str__(self):
+        return f"FAQ for {self.product}: {self.question[:60]}"
 
 
 class Banner(TimeStampedModel):
     title = models.CharField(max_length=150)
     subtitle = models.CharField(max_length=250, blank=True)
-    image = models.ImageField(upload_to="banners/", validators=[validate_image_file_size, validate_banner_logo_image], help_text=BANNER_LOGO_IMAGE_HELP_TEXT)
+    image = models.ImageField(
+        upload_to="banners/",
+        validators=[validate_image_file_size, validate_banner_logo_image],
+        help_text=HERO_BANNER_IMAGE_HELP_TEXT,
+    )
     link = models.CharField(max_length=300, blank=True)
     display_order = models.PositiveIntegerField(default=0)
     starts_at = models.DateTimeField(blank=True, null=True)
@@ -663,6 +786,10 @@ class Banner(TimeStampedModel):
 
     def __str__(self):
         return self.title
+
+    def save(self, *args, **kwargs):
+        resize_hero_banner_image(self.image)
+        super().save(*args, **kwargs)
 
     def clean_fields(self, exclude=None):
         super().clean_fields(exclude=exclude)
@@ -719,14 +846,14 @@ class GiftSection(TimeStampedModel):
     internal_name = models.CharField(max_length=150, help_text="Only used to identify this campaign in admin.")
     badge_eyebrow = models.CharField(max_length=100, blank=True, default="With every order")
     badge_title = models.CharField(max_length=100, blank=True, default="Free gift")
-    badge_icon = models.ImageField(upload_to="gift-sections/badges/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
-    logo = models.ImageField(upload_to="gift-sections/logos/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
+    badge_icon = models.FileField(upload_to="gift-sections/badges/", blank=True, validators=[validate_icon_file], help_text=ICON_FILE_HELP_TEXT)
+    logo = models.FileField(upload_to="gift-sections/logos/", blank=True, validators=[validate_icon_file], help_text=ICON_FILE_HELP_TEXT)
     accent_heading = models.CharField(max_length=150, blank=True, default="Shop More,")
     heading = models.CharField(max_length=200, default="Get More Joy!")
     description = models.TextField(blank=True, default="Every purchase comes with a free gift, just for you!")
-    main_image = models.ImageField(upload_to="gift-sections/main/", validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
-    gift_image = models.ImageField(upload_to="gift-sections/gifts/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
-    background_image = models.ImageField(upload_to="gift-sections/backgrounds/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
+    main_image = models.FileField(upload_to="gift-sections/main/", validators=[validate_icon_file], help_text=ICON_FILE_HELP_TEXT)
+    gift_image = models.FileField(upload_to="gift-sections/gifts/", blank=True, validators=[validate_icon_file], help_text=ICON_FILE_HELP_TEXT)
+    background_image = models.FileField(upload_to="gift-sections/backgrounds/", blank=True, validators=[validate_icon_file], help_text=ICON_FILE_HELP_TEXT)
     thank_you_title = models.CharField(max_length=200, blank=True, default="Thank you for choosing Fabriqx.")
     thank_you_text = models.TextField(blank=True, default="Your love inspires us to keep creating styles that make every moment special.")
     cta_label = models.CharField(max_length=150, blank=True, default="Shop now & get your free gift")
@@ -758,7 +885,7 @@ class GiftSection(TimeStampedModel):
 
 class GiftSectionFeature(TimeStampedModel):
     section = models.ForeignKey(GiftSection, on_delete=models.CASCADE, related_name="features")
-    icon = models.ImageField(upload_to="gift-sections/features/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
+    icon = models.FileField(upload_to="gift-sections/features/", blank=True, validators=[validate_icon_file], help_text=ICON_FILE_HELP_TEXT)
     text = models.CharField(max_length=150)
     display_order = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
@@ -772,7 +899,7 @@ class GiftSectionFeature(TimeStampedModel):
 
 class GiftSectionStatistic(TimeStampedModel):
     section = models.ForeignKey(GiftSection, on_delete=models.CASCADE, related_name="statistics")
-    icon = models.ImageField(upload_to="gift-sections/statistics/", blank=True, validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
+    icon = models.FileField(upload_to="gift-sections/statistics/", blank=True, validators=[validate_icon_file], help_text=ICON_FILE_HELP_TEXT)
     eyebrow = models.CharField(max_length=100, blank=True)
     value = models.CharField(max_length=50)
     label = models.CharField(max_length=100)
@@ -893,9 +1020,14 @@ class FooterSocialSection(TimeStampedModel):
 
 
 class FooterSocialLink(TimeStampedModel):
+    class Platform(models.TextChoices):
+        FACEBOOK = "facebook", "Facebook"
+        X = "x", "X"
+        LINKEDIN = "linkedin", "LinkedIn"
+        INSTAGRAM = "instagram", "Instagram"
+
     section = models.ForeignKey(FooterSocialSection, on_delete=models.CASCADE, related_name="links")
-    platform_name = models.CharField(max_length=80)
-    icon = models.ImageField(upload_to="footer/social-icons/", validators=[validate_image_file_size], help_text=IMAGE_FILE_SIZE_HELP_TEXT)
+    platform_name = models.CharField(max_length=20, choices=Platform.choices)
     url = models.URLField(max_length=300)
     aria_label = models.CharField("Accessibility label", max_length=120, blank=True)
     display_order = models.PositiveIntegerField(default=0)
@@ -903,12 +1035,13 @@ class FooterSocialLink(TimeStampedModel):
 
     class Meta:
         ordering = ("display_order", "id")
+        constraints = [models.UniqueConstraint(fields=("section", "platform_name"), name="unique_footer_social_platform")]
 
     def __str__(self):
         return self.platform_name
 
     def save(self, *args, **kwargs):
-        self.aria_label = self.aria_label or self.platform_name
+        self.aria_label = self.aria_label or self.get_platform_name_display()
         super().save(*args, **kwargs)
 
 
@@ -982,6 +1115,29 @@ class Page(TimeStampedModel):
     def save(self, *args, **kwargs):
         self.slug = self.slug or slugify(self.title)
         super().save(*args, **kwargs)
+
+
+class ContactSubmission(TimeStampedModel):
+    class Status(models.TextChoices):
+        NEW = "new", "New"
+        IN_PROGRESS = "in_progress", "In progress"
+        RESOLVED = "resolved", "Resolved"
+
+    name = models.CharField(max_length=150)
+    email = models.EmailField()
+    phone = models.CharField(max_length=30, blank=True)
+    subject = models.CharField(max_length=200, blank=True)
+    message = models.TextField()
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.NEW)
+    admin_note = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        verbose_name = "Contact"
+        verbose_name_plural = "Contacts"
+
+    def __str__(self):
+        return f"{self.name} — {self.subject or self.email}"
 
 
 class Shipment(TimeStampedModel):
@@ -1074,7 +1230,7 @@ class InventoryReport(ProductVariant):
         verbose_name_plural = "Inventory reports"
 
 
-class InfluencerReport(InfluencerCommission):
+class InfluencerReport(InfluencerProfile):
     class Meta:
         proxy = True
         verbose_name = "Influencer report"

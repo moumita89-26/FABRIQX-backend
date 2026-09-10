@@ -62,13 +62,27 @@
         repeaters('statistics',gift.querySelector('[data-gift-statistics]'),['eyebrow','value','label']);
     }
     function tooltips(root = document) {
-        root.querySelectorAll('a, button, input, select, textarea, label[for]').forEach(node => {
-            if (node.title) return;
-            const label = node.id ? document.querySelector(`label[for="${CSS.escape(node.id)}"]`) : null;
-            const text = node.getAttribute('aria-label') || label?.textContent || (node.matches('a,button,label') ? node.textContent : '') || node.placeholder;
-            if (text?.trim()) node.title = text.trim().replace(/\s+/g,' ');
+        // Limit tooltips to the sidebar menu. Applying Unfold's tooltip class
+        // to icon controls or form inputs can render their icon name as UI.
+        root.querySelectorAll('#nav-sidebar-apps a').forEach(link => {
+            const name = Array.from(link.querySelectorAll('span'))
+                .filter(span => !span.classList.contains('material-symbols-outlined'))
+                .map(span => span.textContent).join(' ')
+                .trim()
+                .replace(/\s+/g, ' ');
+            if (name) {
+                link.classList.remove('tooltip');
+                link.title = name;
+                link.setAttribute('aria-label', name);
+            }
         });
-        document.querySelectorAll('th.sortable a').forEach(link => {link.title=`Sort by ${link.textContent.trim()}`;});
+
+        root.querySelectorAll('#nav-sidebar-apps [data-sidebar-toggle]').forEach(button => {
+            const name = button.querySelector('span:first-child')?.textContent
+                .trim()
+                .replace(/\s+/g, ' ');
+            if (name) button.title = `Expand or collapse ${name}.`;
+        });
     }
     document.addEventListener('change', event => { if(event.target.matches('input[type=file]')) updateImage(event.target); updateGift(); });
     document.addEventListener('input', updateGift);

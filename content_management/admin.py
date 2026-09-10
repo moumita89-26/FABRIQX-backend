@@ -5,12 +5,13 @@ from fabriqx.admin import (
     BannerAdmin,
     BrandLogoSectionAdmin,
     BrandLogoAdmin,
+    ContactSubmissionAdmin,
     FooterSocialSectionAdmin,
     GiftSectionAdmin,
     NewsletterAdmin,
     NewsletterSettingsAdmin,
     OfferBannerAdmin,
-    OfferGridSectionAdmin,
+    OfferGridItemListAdmin,
     PageAdmin,
     SectionAdmin,
     TestimonialAdmin,
@@ -20,13 +21,14 @@ from .models import (
     Banner,
     BrandLogoSection,
     BrandLogo,
+    ContactSubmission,
     FooterSocialSection,
     GiftSection,
     HomepageSection,
     NewsletterSettings,
     NewsletterSubscription,
     OfferBanner,
-    OfferGridSection,
+    OfferGridItem,
     Page,
     Testimonial,
 )
@@ -34,6 +36,7 @@ from .models import (
 
 for model in (
     base.Banner,
+    base.ContactSubmission,
     base.BrandLogoSection,
     base.FooterSocialSection,
     base.GiftSection,
@@ -41,6 +44,7 @@ for model in (
     base.NewsletterSettings,
     base.OfferBanner,
     base.OfferGridSection,
+    base.OfferGridItem,
     base.Testimonial,
     base.NewsletterSubscription,
     base.Page,
@@ -54,7 +58,7 @@ admin.site.register(HomepageSection, SectionAdmin)
 admin.site.register(GiftSection, GiftSectionAdmin)
 admin.site.register(BrandLogoSection, BrandLogoSectionAdmin)
 admin.site.register(OfferBanner, OfferBannerAdmin)
-admin.site.register(OfferGridSection, OfferGridSectionAdmin)
+admin.site.register(OfferGridItem, OfferGridItemListAdmin)
 admin.site.register(FooterSocialSection, FooterSocialSectionAdmin)
 admin.site.register(Testimonial, TestimonialAdmin)
 admin.site.register(
@@ -66,4 +70,5 @@ admin.site.register(
     NewsletterSettingsAdmin,
 )
 admin.site.register(Page, PageAdmin)
+admin.site.register(ContactSubmission, ContactSubmissionAdmin)
 admin.site.register(BrandLogo, BrandLogoAdmin)

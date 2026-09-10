@@ -1,8 +1,21 @@
-{% extends 'admin/base.html' %}
+{% extends 'admin/base_site.html' %}
 {% load i18n %}
 
 {% block content %}
 <div class="flex grow min-w-0 flex-col gap-6">
+    <div class="fabriqx-dashboard-heading flex items-center justify-between gap-4">
+        <p>ADMIN DASHBOARD</p>
+        <form method="get" class="fabriqx-date-range flex items-end justify-end gap-2">
+            <div>
+                <select id="dashboard-date-range" name="date_range" onchange="this.form.submit()" class="rounded-default border border-base-200 bg-white px-3 py-2 text-sm dark:bg-base-900 dark:border-base-700">
+                    {% for value, label in date_ranges %}
+                    <option value="{{ value }}"{% if date_range == value %} selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </form>
+    </div>
+
     <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {% for card in dashboard_cards %}
         <div class="bg-white border border-base-200 flex items-center gap-4 p-5 rounded-default shadow-xs dark:bg-base-900 dark:border-base-800">
@@ -17,11 +30,11 @@
 
     <div class="grid gap-6 xl:grid-cols-2">
         <div class="bg-white border border-base-200 p-5 rounded-default shadow-xs dark:bg-base-900 dark:border-base-800">
-            <h2 class="font-semibold mb-4">Sales — last 7 days</h2>
+            <h2 class="font-semibold mb-4">Sales — {{ date_range_label }}</h2>
             {% include "unfold/components/chart/line.html" with data=sales_chart options=chart_options height="250" %}
         </div>
         <div class="bg-white border border-base-200 p-5 rounded-default shadow-xs dark:bg-base-900 dark:border-base-800">
-            <h2 class="font-semibold mb-4">Orders by status</h2>
+            <h2 class="font-semibold mb-4">Orders by status — {{ date_range_label }}</h2>
             {% include "unfold/components/chart/bar.html" with data=order_chart options=chart_options height="250" %}
         </div>
     </div>
@@ -30,7 +43,7 @@
         <div class="bg-white border border-base-200 p-5 rounded-default dark:bg-base-900 dark:border-base-800">
             <h2 class="font-semibold mb-4">Recent orders</h2>
             <div class="overflow-x-auto"><table class="w-full"><thead><tr class="border-b border-base-200 text-left"><th class="py-2">Order</th><th>Status</th><th>Total</th></tr></thead><tbody>
-                {% for order in recent_orders %}<tr class="border-b border-base-100"><td class="py-3"><a class="text-primary-600" href="{% url 'admin:fabriqx_order_change' order.pk %}">{{ order.number }}</a></td><td>{{ order.get_status_display }}</td><td>{{ order.grand_total }}</td></tr>{% empty %}<tr><td class="py-4" colspan="3">No orders yet.</td></tr>{% endfor %}
+                {% for order in recent_orders %}<tr class="border-b border-base-100"><td class="py-3">{{ order.number }}</td><td>{{ order.status }}</td><td>{{ order.total }}</td></tr>{% endfor %}
             </tbody></table></div>
         </div>
     </div>

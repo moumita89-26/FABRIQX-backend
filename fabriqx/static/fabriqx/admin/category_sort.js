@@ -1,4 +1,34 @@
 document.addEventListener("DOMContentLoaded", () => {
+    const activeToggles = [...document.querySelectorAll('input[name$="-is_active"]')];
+    const csrfToken = document.querySelector("#changelist-form input[name=csrfmiddlewaretoken]")?.value;
+
+    activeToggles.forEach((toggle) => {
+        toggle.addEventListener("change", async () => {
+            const row = toggle.closest("tr");
+            const id = row?.querySelector('input[name$="-id"]')?.value;
+            if (!id || !csrfToken) return;
+
+            const originalValue = !toggle.checked;
+            toggle.disabled = true;
+            try {
+                const response = await fetch(`${window.location.pathname}${id}/toggle-active/`, {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: {"Content-Type": "application/json", "X-CSRFToken": csrfToken},
+                    body: JSON.stringify({is_active: toggle.checked}),
+                });
+                if (!response.ok) {
+                    throw new Error((await response.json()).error || "Unable to update category status.");
+                }
+            } catch (error) {
+                toggle.checked = originalValue;
+                window.alert(error.message);
+            } finally {
+                toggle.disabled = false;
+            }
+        });
+    });
+
     const handles = [...document.querySelectorAll(".category-drag-handle")];
     if (!handles.length) return;
 
@@ -16,7 +46,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const tbody = handles[0].closest("tbody");
     const reorderUrl = handles[0].dataset.reorderUrl;
-    const csrfToken = document.querySelector("#changelist-form input[name=csrfmiddlewaretoken]")?.value;
     let draggedRow = null;
 
     handles.forEach((handle) => {
